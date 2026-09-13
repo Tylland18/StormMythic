@@ -1,0 +1,22 @@
+[
+  {"id":"ln-bird-raven","kin":"birdkin","name":"Raven","lore":"Secret-hoarding brokers of the night-courts.","trait":"Secret-Keeper: bonus to Insight and Deception.","attr":{"INT":1}},
+  {"id":"ln-bird-crow","kin":"birdkin","name":"Crow","lore":"Field-mourners of the old battlegrounds.","trait":"Field-Watch: bonus vs undead and wights.","attr":{"SPI":1}},
+  {"id":"ln-bird-eagle","kin":"birdkin","name":"Eagle","lore":"Proud sky-lords of the high crags.","trait":"Keen Sight: bonus to ranged Perception.","attr":{"PRE":1}},
+  {"id":"ln-bird-falcon","kin":"birdkin","name":"Falcon","lore":"Swift desert hunt-partners and messengers.","trait":"Swift Strike: bonus damage on your first attack.","attr":{"AGI":1}},
+  {"id":"ln-bird-hawk","kin":"birdkin","name":"Hawk","lore":"Sharp-eyed borderland sentinels.","trait":"Sentinel: advantage on initiative.","attr":{"AGI":1}},
+  {"id":"ln-bird-osprey","kin":"birdkin","name":"Osprey","lore":"Diving fisher-hunters of the coasts.","trait":"Diver: bonus in and around water.","attr":{"VIG":1}},
+  {"id":"ln-bird-swan","kin":"birdkin","name":"Swan","lore":"Graceful court-birds of the moonlit Vale.","trait":"Grace: bonus to Performance and Persuasion.","attr":{"PRE":1}},
+  {"id":"ln-bird-heron","kin":"birdkin","name":"Heron","lore":"Patient marsh-hunters and reed-lore keepers.","trait":"Still Patience: bonus to Stealth while unmoving.","attr":{"INS":1}},
+  {"id":"ln-bird-parrot","kin":"birdkin","name":"Parrot","lore":"Polyglot traders of the island ports.","trait":"Polyglot: extra languages, bonus to social checks.","attr":{"INT":1}},
+  {"id":"ln-bird-songbird","kin":"birdkin","name":"Songbird","lore":"Minstrels and criers of the city squares.","trait":"Rally Song: inspire an ally once per rest.","attr":{"PRE":1}},
+  {"id":"ln-bird-vulture","kin":"birdkin","name":"Vulture","lore":"Sacred undertakers of the ash-fields.","trait":"Death-Ward: resist necrotic and disease.","attr":{"VIG":1}},
+  {"id":"ln-bird-magpie","kin":"birdkin","name":"Magpie","lore":"Light-fingered collectors of the grey-markets.","trait":"Light Fingers: bonus to Sleight of Hand.","attr":{"AGI":1}},
+  {"id":"ln-bird-crane","kin":"birdkin","name":"Crane","lore":"Long-lived shrine-keepers and peacemakers.","trait":"Peace-Bringer: bonus to mediation and Insight.","attr":{"SPI":1}},
+  {"id":"ln-bird-seagull","kin":"birdkin","name":"Seagull","lore":"Scrappy dock-folk of every harbor.","trait":"Scavenger: find extra supplies and loot.","attr":{"INS":1}},
+  {"id":"ln-bird-peacock","kin":"birdkin","name":"Peacock","lore":"Resplendent court-birds of the sun-courts.","trait":"Dazzling Display: bonus to Intimidation and Persuasion.","attr":{"PRE":1}},
+  {"id":"ln-bird-hummingbird","kin":"birdkin","name":"Hummingbird","lore":"Tiny tireless pollinators and swift couriers.","trait":"Blur: +10 fly speed and bonus to evasion.","attr":{"AGI":1}},
+  {"id":"ln-bird-woodpecker","kin":"birdkin","name":"Woodpecker","lore":"Carpenters and signal-keepers of the timber-holds.","trait":"Sunder: bonus vs objects and armor.","attr":{"MIG":1}},
+  {"id":"ln-bird-pelican","kin":"birdkin","name":"Pelican","lore":"Carriers and provisioners of the sea-trade.","trait":"Provisioner: carry more, bonus to endurance.","attr":{"VIG":1}},
+  {"id":"ln-bird-cardinal","kin":"birdkin","name":"Cardinal","lore":"Bright winter-heralds of the frozen north.","trait":"Winter Herald: resist Frozen, bonus to morale.","attr":{"SPI":1}},
+  {"id":"ln-bird-bluejay","kin":"birdkin","name":"Blue Jay","lore":"Bold alarm-callers and mimics of the town greens.","trait":"Alarm Cry: warn allies, bonus vs ambush.","attr":{"INS":1}}
+]
