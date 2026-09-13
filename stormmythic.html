@@ -1337,11 +1337,13 @@ SM.data.RARITIES = ['common','uncommon','rare','epic','legendary','mythic','asce
   E.saveMod=(c,attrKey)=>{ const m=E.mods(c); return (m[attrKey]||0)+E.profBonus(E.totalLevel(c)); };
   // level up / multiclass
   E.addClassLevel=(c,classId,discId)=>{
+    if(E.cls(classId)==null) return {ok:false,msg:'Unknown class.'};
+    var okDisc=(discId&&E.disc(discId)&&E.disc(discId).cls===classId)?discId:null;
     let cl=(c.classes||[]).find(x=>x.classId===classId);
-    if(!cl){ cl={classId,level:0,discId:discId||null}; c.classes.push(cl); }
+    if(cl==null){ cl={classId,level:0,discId:okDisc}; c.classes.push(cl); }
     if(cl.level>=20) return {ok:false,msg:'Class already at maximum level (20).'};
-    cl.level++; if(discId) cl.discId=discId;
-    c.hpCur=E.maxHP(c); c.updated=Date.now();
+    cl.level++; if(okDisc) cl.discId=okDisc;
+    c.hpCur=E.maxHP(c); c.totalLevel=E.totalLevel(c); c.tier=E.tierOf(E.totalLevel(c)); E.ensureDerived(c); c.updated=Date.now();
     return {ok:true};
   };
   E.availableAbilities=c=>{
@@ -1363,8 +1365,69 @@ SM.data.RARITIES = ['common','uncommon','rare','epic','legendary','mythic','asce
   const K={chars:'sm_characters',camps:'sm_campaigns',settings:'sm_settings',active:'sm_active_char',custom:'sm_custom',party:'sm_party'};
   const readJSON=(k,def)=>{ try{ const v=localStorage.getItem(k); return v?JSON.parse(v):def; }catch(e){ return def; } };
   const writeJSON=(k,v)=>{ try{ localStorage.setItem(k,JSON.stringify(v)); return true; }catch(e){ SM.ui&&SM.ui.toast&&SM.ui.toast('Storage error: '+e.message,'bad'); return false; } };
+  E.migrateChar=function(raw){
+    var nn=function(v){return v==null?false:true;};
+    if(raw==null||(typeof raw==='object')===false){ return E.newCharacter(); }
+    var def=E.newCharacter();
+    var c={};
+    for(var k in raw){ if(Object.prototype.hasOwnProperty.call(raw,k)){ c[k]=raw[k]; } }
+    if(c.kinId==null && nn(raw.kin)){ c.kinId=raw.kin; }
+    if(c.lineageId==null && nn(raw.lineage)){ c.lineageId=raw.lineage; }
+    if(c.attrsBase==null && nn(raw.attrs)){ c.attrsBase=raw.attrs; }
+    var hasClasses=(Array.isArray(c.classes) && c.classes.length>0);
+    if(hasClasses===false){
+      var legacyId=nn(raw.classId)?raw.classId:(nn(raw['class'])?raw['class']:(nn(raw.className)?raw.className:null));
+      if(nn(legacyId)){
+        c.classes=[{classId:legacyId, level:(typeof raw.level==='number')?raw.level:1, discId:nn(raw.discId)?raw.discId:(nn(raw.disc)?raw.disc:null)}];
+      } else if(Array.isArray(c.classes)===false){
+        c.classes=[];
+      }
+    }
+    if(Array.isArray(c.classes)){
+      c.classes=c.classes.map(function(x){
+        if(x==null||(typeof x==='object')===false){ return {classId:null, level:1, discId:null}; }
+        var e={};
+        for(var kk in x){ if(Object.prototype.hasOwnProperty.call(x,kk)){ e[kk]=x[kk]; } }
+        if(e.classId==null){ e.classId=nn(e.id)?e.id:(nn(e['class'])?e['class']:null); }
+        if((typeof e.level==='number')===false){ e.level=1; }
+        if(e.discId==null){ e.discId=nn(e.disc)?e.disc:null; }
+        return e;
+      });
+    }
+    var ab=(nn(c.attrsBase) && (typeof c.attrsBase==='object'))?c.attrsBase:{};
+    var nab={};
+    for(var ak in def.attrsBase){ nab[ak]=(typeof ab[ak]==='number')?ab[ak]:def.attrsBase[ak]; }
+    for(var ak2 in ab){ if(Object.prototype.hasOwnProperty.call(nab,ak2)===false){ nab[ak2]=ab[ak2]; } }
+    c.attrsBase=nab;
+    var cur=(nn(c.currency) && (typeof c.currency==='object'))?c.currency:{};
+    var ncur={};
+    for(var ck in def.currency){ ncur[ck]=(typeof cur[ck]==='number')?cur[ck]:def.currency[ck]; }
+    for(var ck2 in cur){ if(Object.prototype.hasOwnProperty.call(ncur,ck2)===false){ ncur[ck2]=cur[ck2]; } }
+    c.currency=ncur;
+    if(c.name==null){ c.name=def.name; }
+    if(c.player==null){ c.player=def.player; }
+    if(c.kinId===undefined){ c.kinId=null; }
+    if(c.lineageId===undefined){ c.lineageId=null; }
+    if(c.background==null){ c.background=def.background; }
+    if(c.appearance==null||(typeof c.appearance==='object')===false){ c.appearance=def.appearance; }
+    if(c.appearanceDesc==null){ c.appearanceDesc=def.appearanceDesc; }
+    if(Array.isArray(c.abilities)===false){ c.abilities=[]; }
+    if(Array.isArray(c.spells)===false){ c.spells=[]; }
+    if(Array.isArray(c.inventory)===false){ c.inventory=[]; }
+    if(Array.isArray(c.conditions)===false){ c.conditions=[]; }
+    if(Array.isArray(c.seenAlterations)===false){ c.seenAlterations=[]; }
+    if(c.hpCur===undefined){ c.hpCur=null; }
+    if(c.resCur===undefined){ c.resCur=null; }
+    if((typeof c.xp==='number')===false){ c.xp=0; }
+    if(c.notes==null){ c.notes=def.notes; }
+    if(c.id==null||c.id===''){ c.id='ch-mig-'+String(c.name==null?'unnamed':c.name).toLowerCase().replace(/[^a-z0-9]+/g,'-'); }
+    if((typeof c.created==='number')===false){ c.created=0; }
+    if((typeof c.updated==='number')===false){ c.updated=(typeof c.created==='number')?c.created:0; }
+    c.schema=3;
+    return c;
+  };
   E.store={
-    chars:()=>readJSON(K.chars,[]),
+    chars:()=>readJSON(K.chars,[]).map(function(c){var m=E.migrateChar(c); m.totalLevel=E.totalLevel(m); m.tier=E.tierOf(m.totalLevel); return m;}),
     saveChars:a=>writeJSON(K.chars,a),
     getChar:id=>E.store.chars().find(c=>c.id===id)||null,
     upsertChar:c=>{ c.updated=Date.now(); const a=E.store.chars(); const i=a.findIndex(x=>x.id===c.id); if(i>=0)a[i]=c; else a.push(c); E.store.saveChars(a); return c; },
@@ -1372,6 +1435,8 @@ SM.data.RARITIES = ['common','uncommon','rare','epic','legendary','mythic','asce
     activeId:()=>readJSON(K.active,null),
     setActive:id=>writeJSON(K.active,id),
     activeChar:()=>{ const id=E.store.activeId(); return id?E.store.getChar(id):null; },
+    rawChars:()=>{ var a=readJSON(K.chars,[]); return Array.isArray(a)?a:[]; },
+    deleteCharSafe:function(id){ var wasActive=(E.store.activeId()===id); E.store.saveChars(E.store.chars().filter(function(c){return (c.id===id)===false;})); if(wasActive){ var rest=E.store.chars(); E.store.setActive(rest.length>0?rest[0].id:null); } return E.store.activeId(); },
     camps:()=>readJSON(K.camps,[]),
     saveCamps:a=>writeJSON(K.camps,a),
     upsertCamp:c=>{ const a=E.store.camps(); const i=a.findIndex(x=>x.id===c.id); if(i>=0)a[i]=c; else a.push(c); E.store.saveCamps(a); return c; },
@@ -1468,7 +1533,7 @@ window.SM=SM;
 (function(U){
   const E=SM.engine;
   U.NAV={
-    home:{t:'Home',i:'🏠'}, creator:{t:'Character Creation',i:'✚'}, selection:{t:'Characters',i:'🧝'},
+    home:{t:'Home',i:'🏠'}, creator:{t:'Character Creation',i:'✚'}, roster:{t:'Roster',i:'🗂️'}, selection:{t:'Characters',i:'🧝'},
     sheet:{t:'Character Sheet',i:'📋'}, forge:{t:'Character Forge',i:'⚒️'}, combat:{t:'Combat',i:'⚔️'},
     dice:{t:'Dice Roller',i:'🎲'}, inventory:{t:'Inventory',i:'🎒'}, equipment:{t:'Equipment',i:'🛡️'},
     kin:{t:'Kin Library',i:'🧬'}, lineage:{t:'Lineage Library',i:'🌿'}, classlib:{t:'Class Library',i:'🎖️'},
@@ -1476,7 +1541,7 @@ window.SM=SM;
     enemy:{t:'Enemy Library',i:'👹'}, npc:{t:'NPC Library',i:'🧑‍🤝‍🧑'}, item:{t:'Item Library',i:'🗡️'},
     conditions:{t:'Conditions',i:'☠️'}, lore:{t:'Lore',i:'📜'}, campaigns:{t:'Campaigns',i:'🏰'},
     gm:{t:'GM Tools',i:'🎛️'}, town:{t:'Town',i:'🏘️'}, map:{t:'Map',i:'🗺️'}, quests:{t:'Quests',i:'📌'},
-    factions:{t:'Factions',i:'🏳️'}, settings:{t:'Settings',i:'⚙️'}
+    factions:{t:'Factions',i:'🏳️'}, dashboard:{t:'Progression',i:'📈'}, build:{t:'Power & Build',i:'💠'}, settings:{t:'Settings',i:'⚙️'}
   };
   U.esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   U.rar=r=>`<span class="r ${U.esc(r||'common')}">${U.esc(r||'common')}</span>`;
@@ -1492,8 +1557,8 @@ window.SM=SM;
     document.getElementById('bottomnav').innerHTML=bottom.map(([id,l,ic])=>
       `<button data-nav="${id}" onclick="${id==='__more'?'SM.ui.openMore()':`SM.ui.go('${id}')`}"><span class="ic">${ic}</span>${l}</button>`).join('');
     const groups=[
-      ['Play',['home','selection','creator','sheet','forge','dice','combat']],
-      ['Character',['inventory','equipment','codex','conditions']],
+      ['Play',['home','roster','selection','creator','sheet','forge','dashboard','dice','combat']],
+      ['Character',['build','inventory','equipment','codex','conditions']],
       ['Libraries',['world','kin','lineage','classlib','discipline','ability','spell','enemy','npc','item','factions']],
       ['World',['campaigns','town','quests','map','lore','gm']],
       ['System',['settings']]
@@ -1504,7 +1569,7 @@ window.SM=SM;
   };
   U.syncNav=()=>{ document.querySelectorAll('[data-nav]').forEach(el=>{
     el.classList.toggle('active', el.getAttribute('data-nav')===SM.state.screen); }); };
-  U.openMore=()=>{ const items=[['forge','Character Forge','⚒️'],['selection','Characters','🧝'],['dice','Dice','🎲'],
+  U.openMore=()=>{ const items=[['forge','Character Forge','⚒️'],['dashboard','Progression','📈'],['build','Power & Build','💠'],['roster','Roster','🗂️'],['selection','Characters','🧝'],['dice','Dice','🎲'],
     ['equipment','Equipment','🛡️'],['spell','Spells','🔮'],['kin','Kin','🧬'],['lineage','Lineages','🌿'],
     ['classlib','Classes','🎖️'],['discipline','Disciplines','📕'],['ability','Abilities','✨'],['enemy','Enemies','👹'],
     ['npc','NPCs','🧑‍🤝‍🧑'],['item','Items','🗡️'],['conditions','Conditions','☠️'],['factions','Factions','🏳️'],
@@ -1542,7 +1607,7 @@ SM.screens.home=()=>{
       <div class="row" style="margin-top:12px;gap:8px">
         <button class="btn primary" onclick="SM.ui.go('sheet')">Open Sheet</button>
         <button class="btn" onclick="SM.ui.go('forge')">Forge</button>
-        <button class="btn" onclick="SM.ui.go('combat')">Combat</button>
+        <button class="btn" onclick="SM.ui.go('combat')">Combat</button><button class="btn" onclick="SM.ui.go('roster')">🗂️ Characters</button>
       </div></div>`;
   } else {
     cont=`<div class="panel" style="margin-bottom:16px;text-align:center">
@@ -1626,8 +1691,8 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
       case 0: if(!d.name.trim())return 'Enter a character name.'; break;
       case 1: if(!d.kinId)return 'Choose a Kin.'; break;
       case 2: if(!d.lineageId)return 'Choose a Lineage.'; break;
-      case 3: if(!d.classes.length)return 'Choose a Class.'; break;
-      case 4: if(!d.classes[0].discId)return 'Choose a Discipline.'; break;
+      case 3: { var _cl=this.validateClassLevels(d.classes); if(_cl.valid===false)return _cl.errors[0].msg; break; }
+      case 4: { for(var _i=0;_i<d.classes.length;_i++){ var _x=d.classes[_i]; if(_x.discId==null)return 'Choose a Discipline for every class.'; var _ds=SM.engine.disc(_x.discId); if(_ds==null||((_ds.cls===_x.classId)===false))return 'Each discipline must belong to its class.'; } break; }
     } return null; },
   set(field,val){ this.draft[field]=val; },
   body(){ const E=SM.engine,U=SM.ui,d=this.draft;
@@ -1645,14 +1710,46 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
         `<div class="selectable ${d.lineageId===l.id?'sel':''}" onclick="SM.creator.pick('lineageId','${l.id}')">
           <div class="row between"><b>${l.name}</b><span class="small gold">${Object.entries(l.attr||{}).map(([a,v])=>a+' '+E.signed(v)).join('')}</span></div>
           <div class="small muted">${U.esc(l.lore)}</div><div class="small storm" style="margin-top:4px">${U.esc(l.trait)}</div></div>`).join('')+`</div>${d.lineageId?SM.creator.detailPanel('lineage',d.lineageId):''}`; }
-     case 3: return `<h3>Choose Class <span class="small muted">(multiclass later in the Forge)</span></h3><div class="grid cols2">`+SM.data.CLASSES.map(cl=>
-        `<div class="selectable ${(d.classes[0]&&d.classes[0].classId===cl.id)?'sel':''}" onclick="SM.creator.pickClass('${cl.id}')">
-          <div class="row"><div style="font-size:1.5rem">${cl.icon}</div><div><b>${cl.name}</b><div class="small muted">${cl.role} · ${cl.hitDie} · ${cl.resource}</div></div></div>
-          <div class="small muted" style="margin-top:6px">${U.esc(cl.identity)}</div></div>`).join('')+`</div>${d.classes[0]?SM.creator.detailPanel('classlib',d.classes[0].classId):''}`;
-     case 4: { if(!d.classes.length)return U.need('Pick a Class first.'); const cl=E.cls(d.classes[0].classId); const ds=E.discsFor(cl.id);
-        return `<h3>Choose Discipline <span class="small muted">of ${cl.name}</span></h3><div class="grid cols2">`+ds.map(x=>
-        `<div class="selectable ${d.classes[0].discId===x.id?'sel':''}" onclick="SM.creator.pickDisc('${x.id}')">
-          <b>${x.name}</b><div class="small storm">${U.esc(x.ident)}</div><div class="small muted" style="margin-top:4px">${U.esc(x.build)}</div></div>`).join('')+`</div>${d.classes[0].discId?SM.creator.detailPanel('discipline',d.classes[0].discId):''}`; }
+     case 3: {
+       if(d.classes.length===0){
+         return `<h3>Choose Class</h3><p class="small muted">Pick your first class. You can add more classes after.</p><div class="grid cols2">`+SM.data.CLASSES.map(cl=>
+          `<div class="selectable" onclick="SM.creator.pickClass('${cl.id}')">
+            <div class="row"><div style="font-size:1.5rem">${cl.icon}</div><div><b>${cl.name}</b><div class="small muted">${cl.role} · ${cl.hitDie} · ${cl.resource}</div></div></div>
+            <div class="small muted" style="margin-top:6px">${U.esc(cl.identity)}</div></div>`).join('')+`</div>`;
+       }
+       var tot=this.calculateTotalLevel(d.classes); var tier=this.calculateCharacterTier(tot);
+       var chosen=d.classes.map(function(cc){return cc.classId;});
+       var avail=SM.data.CLASSES.filter(function(cl){ return chosen.indexOf(cl.id)<0; });
+       var entries=d.classes.map((cc,idx)=>{ var cl=E.cls(cc.classId); var ds=(cc.discId==null)?null:E.disc(cc.discId); var can=(d.classes.length>1);
+         return `<div class="selectable sel" style="cursor:default">
+           <div class="row between">
+             <div class="row"><div style="font-size:1.4rem">${cl.icon}</div><div><b>${cl.name}</b>${idx===0?' <span class="tag">Primary</span>':''}<div class="small muted">${(ds==null)?'No discipline yet':('Discipline: '+U.esc(ds.name))}</div></div></div>
+             ${can?`<button class="btn ghost sm danger" onclick="SM.creator.removeClass('${cc.classId}')">Remove</button>`:''}
+           </div>
+           <div class="row" style="margin-top:8px;align-items:center;gap:8px">
+             <span class="small muted">Level</span>
+             <button class="btn ghost sm" onclick="SM.creator.incClassLevel('${cc.classId}',-1)">-</button>
+             <input type="number" min="1" max="20" step="1" value="${cc.level}" onchange="SM.creator.setClassLevel('${cc.classId}',this.value)" style="width:64px;text-align:center;padding:6px;border-radius:8px">
+             <button class="btn ghost sm" onclick="SM.creator.incClassLevel('${cc.classId}',1)">+</button>
+             <span class="small faint">(1-20)</span>
+           </div></div>`; }).join('');
+       return `<h3>Choose Class <span class="small muted">(multiclass supported)</span></h3>
+         <div class="grid">${entries}</div>
+         <div class="panel row between" style="margin-top:10px;align-items:center">
+           <div><span class="small muted">Total Level</span><div style="font-size:1.3rem"><b>${tot}</b></div></div>
+           <div style="text-align:right"><span class="small muted">Tier</span><div><span class="tier-badge tier-${tier}">${tier}</span></div></div></div>
+         ${avail.length?`<h4 style="margin-top:14px">Add Another Class</h4><div class="grid cols2">`+avail.map(cl=>
+          `<div class="selectable" onclick="SM.creator.addClass('${cl.id}')">
+            <div class="row"><div style="font-size:1.3rem">${cl.icon}</div><div><b>${cl.name}</b><div class="small muted">${cl.role} · ${cl.resource}</div></div></div></div>`).join('')+`</div>`:''}
+         ${SM.creator.detailPanel('classlib',d.classes[0].classId)}`;
+     }
+     case 4: { if(d.classes.length===0)return U.need('Pick a Class first.');
+        return `<h3>Choose Discipline</h3><p class="small muted">Each class has its own discipline.</p>`+d.classes.map(function(cc){ var cl=E.cls(cc.classId); var ds=E.discsFor(cl.id);
+          return `<div class="panel" style="margin-top:10px"><div class="row" style="margin-bottom:6px;gap:8px;align-items:center"><div style="font-size:1.2rem">${cl.icon}</div><b>${cl.name}</b><span class="small muted">Level ${cc.level}</span></div><div class="grid cols2">`+ds.map(function(x){
+            return `<div class="selectable ${cc.discId===x.id?'sel':''}" onclick="SM.creator.pickDiscFor('${cc.classId}','${x.id}')">
+              <b>${x.name}</b><div class="small storm">${U.esc(x.ident)}</div><div class="small muted" style="margin-top:4px">${U.esc(x.build)}</div></div>`;
+          }).join('')+`</div></div>`;
+        }).join('')+`${(d.classes.length===1&&d.classes[0].discId)?SM.creator.detailPanel('discipline',d.classes[0].discId):''}`; }
      case 5: return this.attrBody();
      case 6: return `<h3>Background</h3>
         <label class="fld"><span>Background & History</span><textarea oninput="SM.creator.draft.background=this.value" placeholder="Where does your hero come from? What drives them?">${U.esc(d.background)}</textarea></label>`;
@@ -1676,6 +1773,55 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
   pick(f,v){ this.draft[f]=v; this.refresh(); },
   pickClass(id){ this.draft.classes=[{classId:id,level:1,discId:null}]; this.refresh(); },
   pickDisc(id){ this.draft.classes[0].discId=id; this.refresh(); },
+  addClass(id){ var c=this.draft.classes; if(SM.engine.cls(id)==null)return; for(var i=0;i<c.length;i++){ if(c[i].classId===id)return; } c.push({classId:id,level:1,discId:null}); this.refresh(); },
+  removeClass(id){ var c=this.draft.classes; if(c.length<=1)return; var out=[]; for(var i=0;i<c.length;i++){ if(c[i].classId===id){ continue; } out.push(c[i]); } if(out.length===0){ out=[c[0]]; } this.draft.classes=out; this.refresh(); },
+  setClassLevel(id,val){ var c=this.draft.classes; var n=Number(val); if(Number.isFinite(n)===false){ this.refresh(); return; } n=Math.floor(n); if(n<1){n=1;} if(n>20){n=20;} for(var i=0;i<c.length;i++){ if(c[i].classId===id){ c[i].level=n; break; } } this.refresh(); },
+  incClassLevel(id,delta){ var c=this.draft.classes; for(var i=0;i<c.length;i++){ if(c[i].classId===id){ this.setClassLevel(id,(c[i].level||1)+delta); return; } } },
+  pickDiscFor(cid,did){ var ds=SM.engine.disc(did); if(ds==null)return; if((ds.cls===cid)===false)return; var c=this.draft.classes; for(var i=0;i<c.length;i++){ if(c[i].classId===cid){ c[i].discId=did; break; } } this.refresh(); },
+
+  normalizeClassLevels(classes){ var E=SM.engine; var out=[]; var index={};
+    if(Array.isArray(classes)===false) return out;
+    classes.forEach(function(x){
+      if(x==null||(typeof x==='object')===false) return;
+      var def=(x.classId==null)?null:E.cls(x.classId);
+      if(def==null) return;
+      var lv=Number(x.level); if(Number.isFinite(lv)===false) lv=1; lv=Math.floor(lv); if(lv<1) lv=1; if(lv>20) lv=20;
+      var discId=(x.discId==null)?null:x.discId;
+      if(Object.prototype.hasOwnProperty.call(index,def.id)){ var e=out[index[def.id]]; e.level=Math.min(20,e.level+lv); if(e.discId==null&&(discId==null)===false) e.discId=discId; }
+      else { index[def.id]=out.length; out.push({classId:def.id, level:lv, discId:discId}); }
+    });
+    return out; },
+  calculateTotalLevel(classes){ var norm=this.normalizeClassLevels(classes); var t=0; norm.forEach(function(e){ t+=e.level; }); return t; },
+  calculateCharacterTier(totalLevel){ var E=SM.engine; var t=Number(totalLevel); if(Number.isFinite(t)===false) t=0; return E.tierOf(t); },
+  validateClassLevels(classes){ var E=SM.engine; var errors=[]; var nn=function(v){return v==null?false:true;};
+    var push=function(msg){ errors.push({code:'class',step:3,msg:msg}); };
+    if(Array.isArray(classes)===false||classes.length===0){ push('Choose a Class.'); return {valid:false, errors:errors}; }
+    classes.forEach(function(x){
+      var def=(x&&nn(x.classId))?E.cls(x.classId):null;
+      if(def==null){ push('Invalid class selected.'); }
+      var lv=(x==null)?undefined:x.level;
+      var lvOk=(typeof lv==='number'&&Number.isFinite(lv)&&Math.floor(lv)===lv&&lv>=1&&lv<=20);
+      if(lvOk===false){ push('Class level must be an integer from 1 to 20.'); }
+    });
+    return {valid:(errors.length===0), errors:errors}; },
+  validateCharacter(){ var E=SM.engine, d=this.draft; var errors=[]; var nn=function(v){return v==null?false:true;};
+    var push=function(code,step,msg){ errors.push({code:code,step:step,msg:msg}); };
+    if(d==null){ return {valid:false, errors:[{code:'draft',step:-1,msg:'No character in progress.'}]}; }
+    var nm=(typeof d.name==='string')?d.name.trim():''; if(nm.length===0){ push('name',0,'Enter a character name.'); }
+    if(d.kinId==null||E.kin(d.kinId)==null){ push('kin',1,'Choose a valid Kin.'); }
+    if(d.lineageId==null||E.lineage(d.lineageId)==null){ push('lineage',2,'Choose a valid Lineage.'); }
+    var classes=Array.isArray(d.classes)?d.classes:[];
+    this.validateClassLevels(classes).errors.forEach(function(e){ errors.push(e); });
+    classes.forEach(function(x){
+        var cl=(x&&nn(x.classId))?E.cls(x.classId):null;
+        var ds=(x&&nn(x.discId))?E.disc(x.discId):null;
+        if(ds==null){ push('discipline',4,'Choose a Discipline for the class.'); }
+        else if(nn(cl)&&((ds.cls===cl.id)===false)){ push('discipline',4,'Discipline does not belong to the selected class.'); }
+      });
+    var as=this.attrStatus();
+    if(as.allValid===false){ var det=[]; if(as.unassigned.length>0){det.push('unassigned: '+as.unassigned.join(', '));} if(as.invalid.length>0){det.push('invalid: '+as.invalid.join(', '));} push('attributes',5,'Attributes incomplete ('+det.join('; ')+').'); }
+    var __total=this.calculateTotalLevel(classes); var __tier=this.calculateCharacterTier(__total);
+    return { valid:(errors.length===0), errors:errors, totalLevel:__total, tier:__tier }; },
   toggleSpell(id){ const a=this.draft.spells; const i=a.indexOf(id); if(i>=0)a.splice(i,1); else if(a.length<2)a.push(id); else SM.ui.toast('Max 2 cantrips at creation.','info'); this.refresh(); },
   classAbilities(){ const d=this.draft; if(!d.classes.length)return []; const clsId=d.classes[0].classId,discId=d.classes[0].discId;
     return SM.data.ABILITIES.filter(a=>a.cls===clsId&&a.level<=1&&(!a.disc||a.disc===discId)); },
@@ -1701,7 +1847,7 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
       inner=`${cfgUI}<button class="btn primary" onclick="SM.creator.rollAttrs('${method}')">🎲 Roll ${method==='gm'?'Custom':'Attributes'}</button>${pool}`;
     } else {
       inner=`<div class="grid cols2">`+SM.data.ATTRS.map(at=>`<label class="fld"><span>${at.name} (${at.id})</span>
-        <input type="number" value="${d.attrsBase[at.id]}" oninput="SM.creator.draft.attrsBase['${at.id}']=+this.value||0"></label>`).join('')+`</div>`;
+        <input type="number" value="${d.attrsBase[at.id]}" oninput="SM.creator.setManual('${at.id}',this.value)"></label>`).join('')+`</div>`;
     }
     // preview with kin/lineage
     const a=E.attrs(d);
@@ -1709,14 +1855,16 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
       <div class="statgrid" style="margin-top:8px">`+SM.data.ATTRS.map(at=>`<div class="stat"><div class="lab">${at.id}</div><div class="val">${a[at.id]}</div><div class="mod">${E.fmtMod(a[at.id])}</div></div>`).join('')+`</div>`;
     return `<h3>Attributes</h3><div class="pill-row" style="margin-bottom:12px">${tabs}</div>${inner}${preview}`; },
   setMethod(m){ this._method=m; this.refresh(); },
+  setManual(attr,raw){ var d=this.draft; if(d==null) return; d.attrsBase=d.attrsBase||{}; var mn=(this.cfg&&Number.isFinite(this.cfg.min))?this.cfg.min:3; var mx=(this.cfg&&Number.isFinite(this.cfg.max))?this.cfg.max:18; var n=Number(raw); if(Number.isFinite(n)===false){ return; } n=Math.round(n); if(n<mn)n=mn; if(n>mx)n=mx; d.attrsBase[attr]=n; },
+  attrStatus(opts){ opts=opts||{}; var self=this; var method=opts.method||this._method||'roll'; var mn=Number.isFinite(opts.min)?opts.min:((this.cfg&&Number.isFinite(this.cfg.min))?this.cfg.min:3); var status={},unassigned=[],invalid=[]; var okNum=function(v){ return (typeof v==='number')&&Number.isFinite(v)&&(Math.floor(v)===v)&&(v>=mn); }; SM.data.ATTRS.forEach(function(at){ var st; if(method==='roll'||method==='gm'){ var asn=opts.assign||self.assign||{}; var pool=opts.pool||self.pool||[]; var idx=asn[at.id]; if(idx==null||idx<0){ st='unassigned'; } else { var v=pool[idx]; st=okNum(v)?'valid':'invalid'; } } else { var ab=opts.attrsBase||(self.draft&&self.draft.attrsBase)||{}; var v2=ab[at.id]; if(v2==null){ st='unassigned'; } else { st=okNum(v2)?'valid':'invalid'; } } status[at.id]=st; if(st==='unassigned')unassigned.push(at.id); if(st==='invalid')invalid.push(at.id); }); return { status:status, unassigned:unassigned, invalid:invalid, allAssigned:(unassigned.length===0), allValid:(unassigned.length===0&&invalid.length===0) }; },
   rollAttrs(method){ const E=SM.engine; const cfg=method==='gm'?this.cfg:{formula:'4d6',count:7,dropLow:1,dropHigh:0,min:3,max:18};
     const vals=[]; for(let i=0;i<(cfg.count||7);i++){ const r=E.parseFormula(cfg.formula); let dice=[];
       (r.terms||[]).forEach(t=>{dice=dice.concat(E.rollDice(t.n,t.sides));}); dice.sort((a,b)=>a-b);
       for(let x=0;x<(cfg.dropLow||0);x++)dice.shift(); for(let x=0;x<(cfg.dropHigh||0);x++)dice.pop();
-      let v=dice.reduce((a,b)=>a+b,0)+(r.flat||0); v=Math.max(cfg.min||1,Math.min(cfg.max||30,v)); vals.push(v); }
+      let v=dice.reduce((a,b)=>a+b,0)+(r.flat||0); v=Math.round(Number(v)); var vmin=(Number.isFinite(cfg.min)?cfg.min:1),vmax=(Number.isFinite(cfg.max)?cfg.max:30); v=Math.max(vmin,Math.min(vmax,v)); if(Number.isFinite(v)===false)v=vmin; vals.push(v); }
     this.pool=vals.sort((a,b)=>b-a); this.assign={}; this.refresh(); },
   assignVal(attr,idx){ this.assign=this.assign||{}; if(idx<0){delete this.assign[attr];} else this.assign[attr]=idx; this.applyAssign(); this.refresh(); },
-  applyAssign(){ const base={MIG:10,VIG:10,PRE:10,SPI:10,AGI:10,INS:10,INT:10}; for(const at in (this.assign||{})){ base[at]=this.pool[this.assign[at]]; } this.draft.attrsBase=base; },
+  applyAssign(){ const base={MIG:10,VIG:10,PRE:10,SPI:10,AGI:10,INS:10,INT:10}; for(const at in (this.assign||{})){ var pv=this.pool[this.assign[at]]; if(Number.isFinite(pv)){ base[at]=pv; } } this.draft.attrsBase=base; },
   autoAssign(){ const d=this.draft; const cl=SM.engine.cls(d.classes[0]&&d.classes[0].classId); const order=cl?[...cl.primary]:['MIG','AGI']; 
     const rest=SM.data.ATTRS.map(a=>a.id).filter(x=>!order.includes(x)); const seq=[...order,...rest]; this.assign={};
     this.pool.forEach((v,i)=>{ if(seq[i]) this.assign[seq[i]]=i; }); this.applyAssign(); this.refresh(); },
@@ -1734,12 +1882,21 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
       d.inventory.filter(i=>i.slot===slot&&i.equipped).forEach(i=>i.equipped=false);
       d.inventory.push({instId:'inst-'+Math.random().toString(36).slice(2,8),itemId,qty:1,equipped:true,slot}); }
     this.refresh(); },
+  validationPanel(){ var E=SM.engine,U=SM.ui; var r=E.validateBuild(this.draft,'create');
+    var stepOf={name:0,kin:1,lineage:2,classes:3,class:3,discipline:4,ability:9,attributes:5};
+    var errHtml=r.errors.map(function(e){ var st=stepOf[e.code]; var jump=(typeof st==='number')?(' <button class="btn ghost sm" onclick="SM.creator.goStep('+st+')">Fix</button>'):''; return '<div class="li" style="cursor:default"><div class="ava">\u26a0\ufe0f</div><div class="meta"><div class="t">'+U.esc(e.msg)+'</div></div>'+jump+'</div>'; }).join('');
+    var warnHtml=r.warnings.map(function(w){ return '<div class="small faint">&bull; '+U.esc(w.msg)+'</div>'; }).join('');
+    var head=r.valid?'<div class="panel" role="status" aria-live="polite" style="border-color:var(--emerald)"><div class="small" style="color:var(--emerald)"><b>Build valid.</b> Ready to create.</div></div>':'<div class="panel" role="alert" aria-live="assertive" style="border-color:#c0392b"><div class="eyebrow" style="color:#ff6b6b">Errors ('+r.errors.length+') \u2014 fix before creating</div><div class="list">'+errHtml+'</div></div>';
+    var warnBlock=(r.warnings.length>0)?('<div class="panel" style="margin-top:8px"><div class="eyebrow">Warnings ('+r.warnings.length+')</div>'+warnHtml+'</div>'):'';
+    return '<div class="section-head" style="margin-top:14px"><h3>Validation</h3></div>'+head+warnBlock; },
   reviewBody(){ const E=SM.engine,U=SM.ui,d=this.draft; const k=E.kin(d.kinId),l=E.lineage(d.lineageId),cl=E.cls(d.classes[0]&&d.classes[0].classId),ds=E.disc(d.classes[0]&&d.classes[0].discId);
     E.ensureDerived(d); const def=E.defenses(d);
+    var _tot=this.calculateTotalLevel(d.classes); var _tier=this.calculateCharacterTier(_tot); var _clsList=d.classes.map(function(cc){ var c2=E.cls(cc.classId); var s2=(cc.discId==null)?null:E.disc(cc.discId); return `<div class="row between" style="padding:4px 0"><div><b>${c2?c2.name:cc.classId}</b> <span class="small muted">Level ${cc.level}</span></div><div class="small storm">${s2?('Discipline: '+U.esc(s2.name)):'No discipline'}</div></div>`; }).join('');
     return `<h3>Review</h3>
       <div class="row"><div class="ava" style="width:52px;height:52px;font-size:1.5rem">${k?k.icon:'🧝'}</div>
         <div><b style="font-size:1.1rem">${U.esc(d.name||'Unnamed')}</b><div class="small muted">${k?k.name:''} · ${l?l.name:''}</div>
-        <div class="small">${cl?cl.name:''} 1 · ${ds?ds.name:''} · ${E.tierOf(1)}</div></div></div>
+        <div class="small">Total Level ${_tot} · <span class="tier-badge tier-${_tier}">${_tier}</span></div><div class="small storm">${U.esc(E.buildIdentity(d).label)}</div></div></div>
+      <div class="panel" style="margin-top:10px"><div class="eyebrow">Classes</div>${_clsList}</div>
       ${U.attrRow(d)}
       <div class="grid cols" style="margin-top:12px">
         <div class="kv"><span class="k">HP</span><span class="v">${E.maxHP(d)}</span></div>
@@ -1747,10 +1904,11 @@ SM.creator={ i:0, draft:null, pool:[], cfg:{formula:'4d6',count:7,dropLow:1,drop
         <div class="kv"><span class="k">Speed</span><span class="v">${E.speed(d)} ft</span></div>
         <div class="kv"><span class="k">${E.resource(d).name}</span><span class="v">${E.resource(d).max}</span></div>
       </div>
-      <p class="small muted" style="margin-top:10px">Press "Create Character" to save. Your hero will be set active and opened in the sheet.</p>`; },
-  finish(){ const E=SM.engine,d=this.draft; if(!d.name.trim()){SM.ui.toast('Name required.','bad');this.i=0;this.refresh();return;}
+      ${this.validationPanel()}<p class="small muted" style="margin-top:10px">Press "Create Character" to save. Your hero will be set active and opened in the sheet.</p>`; },
+  finish(){ const E=SM.engine,d=this.draft; var __v=this.validateCharacter(); if(__v.valid===false){ var __e=__v.errors[0]; if(__e){ SM.ui.toast(__e.msg,'bad'); if(typeof __e.step==='number'&&__e.step>=0){ this.i=__e.step; } this.refresh(); } return; } if(!d.name.trim()){SM.ui.toast('Name required.','bad');this.i=0;this.refresh();return;}
     if(!d.classes.length){SM.ui.toast('Class required.','bad');return;}
-    d.abilities=this.classAbilities().map(a=>a.id); E.ensureDerived(d);
+    d.classes=this.normalizeClassLevels(d.classes); d.totalLevel=this.calculateTotalLevel(d.classes); d.tier=this.calculateCharacterTier(d.totalLevel);
+    d.abilities=this.classAbilities().map(a=>a.id); E.ensureDerived(d); var __vb=E.validateBuild(d,'create'); if(__vb.valid===false){ var __be=__vb.errors[0]||{code:'',msg:'Invalid build.'}; var __map={name:0,kin:1,lineage:2,classes:3,class:3,discipline:4,ability:9,attributes:5}; SM.ui.toast(__be.msg,'bad'); var __st=__map[__be.code]; if(typeof __st==='number'){ this.i=__st; } this.refresh(); return; }
     E.store.upsertChar(d); E.store.setActive(d.id); SM.ui.toast('Character forged!','ok'); this.draft=null; SM.ui.go('sheet'); }
 };
 SM.screens.creator=()=>SM.creator.render();
@@ -1799,8 +1957,8 @@ SM.screens.sheet=()=>{ const E=SM.engine,U=SM.ui; const c=SM.act.get();
       <button class="btn sm danger" onclick="SM.sheet.quick('dmg')">− Damage</button>
       <button class="btn sm" onclick="SM.sheet.quick('heal')">+ Heal</button>
       <button class="btn sm" onclick="SM.sheet.rest()">🛏️ Long Rest</button>
-      <button class="btn sm" onclick="SM.sheet.addXP()">+ XP</button>
-      <button class="btn sm primary" onclick="SM.ui.go('forge')">⚒️ Forge</button>
+      <button class="btn sm" onclick="SM.sheet.addXP()">+ XP</button><button class="btn sm" onclick="SM.ui.go('roster')">🗂️ Characters</button>
+      <button class="btn sm" onclick="SM.ui.go('dashboard')">📈 Progression</button><button class="btn sm" onclick="SM.ui.go('build')">💠 Power & Build</button><button class="btn sm primary" onclick="SM.ui.go('forge')">⚒️ Forge</button>
     </div>
   </div>
 
@@ -1896,7 +2054,7 @@ SM.screens.forge=()=>{ const E=SM.engine,U=SM.ui; const c=SM.act.get();
   E.ensureDerived(c); const tl=E.totalLevel(c); const canLevel=(c.xp||0)>=E.xpForLevel(tl+1);
   const classSection=(c.classes||[]).map(x=>{const cl=E.cls(x.classId);const d=E.disc(x.discId);
     return `<div class="card" style="cursor:default"><div class="row between"><b>${cl.name} ${x.level}</b>
-      <button class="btn sm ${x.level<20?'primary':''}" ${x.level>=20?'disabled':''} onclick="SM.forge.levelUp('${x.classId}')">${x.level>=20?'Max':'Level Up →'}</button></div>
+      <button class="btn sm ${x.level<20?'primary':''}" ${x.level>=20?'disabled':''} onclick="SM.forge.previewLevelUp('${x.classId}')">${x.level>=20?'Max':'Level Up →'}</button></div>
       <div class="small muted">${cl.role} · ${cl.resource} · ${cl.hitDie}</div>
       ${d?`<div class="small storm">${d.name}</div>`:`<div class="pill-row" style="margin-top:6px">${E.discsFor(cl.id).map(dd=>`<button class="chip" onclick="SM.forge.chooseDisc('${cl.id}','${dd.id}')">${dd.name}</button>`).join('')}</div>`}
     </div>`;}).join('');
@@ -1922,17 +2080,400 @@ SM.screens.forge=()=>{ const E=SM.engine,U=SM.ui; const c=SM.act.get();
     return `<div class="list">`+avail.slice(0,30).map(s=>`<div class="li"><div class="ava">🔮</div><div class="meta"><div class="t">${s.name} <span class="tag">${s.school} ${s.level}</span></div><div class="s">${U.esc(s.desc)}</div></div><button class="btn sm" onclick="SM.forge.learnSpell('${s.id}')">Learn</button></div>`).join('')+`</div>`; })()}
 
   <div class="section-head" style="margin-top:16px"><h3>Quick Actions</h3></div>
+  <div class="row" style="margin-top:6px"><button class="btn primary" onclick="SM.ui.go('dashboard')">📈 Progression Dashboard</button></div>
   <div class="row"><button class="btn" onclick="SM.ui.go('equipment')">🛡️ Equipment</button><button class="btn" onclick="SM.ui.go('inventory')">🎒 Inventory</button><button class="btn" onclick="SM.forge.editAttrs()">Edit Attributes</button></div>
   `;
 };
 SM.forge={
-  levelUp:classId=>{ const c=SM.act.get(); const before=SM.engine.alterationsFor(c).unlocked.map(function(a){return a.name;}); const r=SM.engine.addClassLevel(c,classId); if(r.ok===false){SM.ui.toast(r.msg,'bad');return;} SM.act.save(c); const cl=SM.engine.cls(classId); const lvl=(c.classes.find(function(y){return y.classId===classId;})||{}).level; SM.ui.toast(cl.name+' is now level '+lvl+'.','ok'); SM.engine.alterationsFor(c).unlocked.filter(function(a){return before.indexOf(a.name)<0;}).forEach(function(a){SM.ui.toast('Alteration unlocked: '+a.name+'.','info');}); SM.ui.render(); },
-  chooseDisc:(classId,discId)=>{ const c=SM.act.get(); const x=c.classes.find(y=>y.classId===classId); x.discId=discId; SM.act.save(c); SM.ui.toast('Discipline: '+SM.engine.disc(discId).name,'ok'); SM.ui.render(); },
+  previewLevelUp:classId=>{ const E=SM.engine,U=SM.ui; const c=SM.act.get(); if(c==null){U.toast('No active character.','bad');return;} const pv=E.levelUpPreview(c,classId); const cl=E.cls(classId); if(pv.ok===false){U.toast(pv.msg||'Cannot level up.','bad');return;} const curTotal=E.totalLevel(c),newTotal=curTotal+1,curTier=E.tierOf(curTotal),newTier=E.tierOf(newTotal); const rew=E.progressionRewards(c); const cr=rew.classes.find(function(y){return y.classId===classId;})||{abilities:{available:[],upcoming:[]},passives:{upcoming:[]},pending:[]}; const tierLine=(curTier===newTier)?`<div class="small">Tier: <span class="tier-badge tier-${curTier}">${curTier}</span></div>`:`<div class="small" style="margin-top:4px;color:var(--gold)"><b>TIER ASCENDED</b> <span class="tier-badge tier-${curTier}">${curTier}</span> &rarr; <span class="tier-badge tier-${newTier}">${newTier}</span></div>`; const newAb=(pv.newAbilities||[]),newPa=(pv.newPassives||[]),up=(cr.abilities.upcoming||[]).slice(0,3); const html=`<div class="panel"><b>${U.esc(cl.name)} ${pv.prevLevel} &rarr; ${U.esc(cl.name)} ${pv.newLevel}</b><div class="small" style="margin-top:4px">Total Level: ${curTotal} &rarr; ${newTotal}</div>${tierLine}</div>`+(newAb.length>0?`<div class="eyebrow" style="margin-top:10px">Newly Available Abilities</div><div class="list">`+newAb.map(function(a){return `<div class="li" style="cursor:default"><div class="ava">\u2728</div><div class="meta"><div class="t">${U.esc(a.name)} <span class="tag">Lv ${a.level}</span></div><div class="s">${U.esc(a.desc)}</div></div></div>`;}).join('')+`</div>`:'')+(newPa.length>0?`<div class="eyebrow" style="margin-top:10px">Newly Unlocked Passives</div><div class="list">`+newPa.map(function(p){return `<div class="li" style="cursor:default"><div class="ava">\uD83E\uDDEC</div><div class="meta"><div class="t">${U.esc(p.name)} <span class="tag">Lv ${p.level}</span></div><div class="s">${U.esc(p.desc)}</div></div></div>`;}).join('')+`</div>`:'')+(up.length>0?`<div class="eyebrow" style="margin-top:10px">Upcoming</div>`+up.map(function(a){return `<div class="small faint">Lv ${a.level}: ${U.esc(a.name)}</div>`;}).join(''):'')+(cr.pending.length>0?`<div class="eyebrow" style="margin-top:10px">Pending Choice</div>`+cr.pending.map(function(p){return `<div class="small storm">${U.esc(p.msg)}</div>`;}).join(''):'')+`<div class="row" style="margin-top:14px;gap:8px"><button class="btn primary" onclick="SM.forge.confirmLevelUp('${classId}')">Confirm Level Up</button><button class="btn ghost" onclick="SM.ui.closeModal()">Cancel</button></div>`; U.modal('Level Up Preview', html); },
+  confirmLevelUp:classId=>{ const E=SM.engine,U=SM.ui; const c=SM.act.get(); if(c==null)return; const pv=E.levelUpPreview(c,classId); if(pv.ok===false){U.toast(pv.msg||'Cannot level up.','bad');return;} const curTotal=E.totalLevel(c),curTier=E.tierOf(curTotal); SM.forge.levelUp(classId); const c2=SM.act.get(); const cl=E.cls(classId); const newTotal=E.totalLevel(c2),newTier=E.tierOf(newTotal); const rew=E.progressionRewards(c2); const cr=rew.classes.find(function(y){return y.classId===classId;})||{abilities:{available:[],upcoming:[]},passives:{unlocked:[],upcoming:[]},pending:[]}; const newAb=(pv.newAbilities||[]),newPa=(pv.newPassives||[]),avail=(cr.abilities.available||[]),up=(cr.abilities.upcoming||[]).slice(0,3); const tierLine=(curTier===newTier)?`<div class="small">Tier: <span class="tier-badge tier-${newTier}">${newTier}</span></div>`:`<div class="small" style="margin-top:4px;color:var(--gold)"><b>TIER ASCENDED</b> <span class="tier-badge tier-${curTier}">${curTier}</span> &rarr; <span class="tier-badge tier-${newTier}">${newTier}</span></div>`; const newSec=((newAb.length>0)||(newPa.length>0))?`<div class="eyebrow" style="margin-top:10px">New</div>`+newAb.map(function(a){return `<div class="small">&bull; Ability: <b>${U.esc(a.name)}</b> <span class="tag">Lv ${a.level}</span></div>`;}).join('')+newPa.map(function(p){return `<div class="small">&bull; Passive: <b>${U.esc(p.name)}</b> <span class="tag">Lv ${p.level}</span></div>`;}).join(''):''; const availSec=avail.length>0?`<div class="eyebrow" style="margin-top:10px">Available</div><div class="list">`+avail.map(function(a){return `<div class="li"><div class="ava">\u2728</div><div class="meta"><div class="t">${U.esc(a.name)} <span class="tag">Lv ${a.level}</span>${a.disc?` <span class="tag">${U.esc(E.disc(a.disc)?E.disc(a.disc).name:a.disc)}</span>`:''}</div><div class="s">${U.esc(a.desc)}</div></div><button class="btn sm primary" onclick="SM.forge.learnAbility('${a.id}')">Learn</button></div>`;}).join('')+`</div>`:''; const upSec=up.length>0?`<div class="eyebrow" style="margin-top:10px">Upcoming</div>`+up.map(function(a){return `<div class="small faint">Lv ${a.level}: ${U.esc(a.name)}</div>`;}).join(''):''; const pendSec=cr.pending.length>0?`<div class="eyebrow" style="margin-top:10px">Discipline Choice Required</div><div class="small storm" style="margin-bottom:6px">${U.esc(cr.pending[0].msg)}</div><div class="pill-row">`+E.discsFor(classId).map(function(dd){return `<button class="chip" onclick="SM.forge.chooseDisc('${classId}','${dd.id}')">${U.esc(dd.name)}</button>`;}).join('')+`</div>`:''; const html=`<div class="panel"><b>${U.esc(cl.name)} ${pv.prevLevel} &rarr; ${U.esc(cl.name)} ${pv.newLevel}</b><div class="small" style="margin-top:4px">Total Level: ${curTotal} &rarr; ${newTotal}</div>${tierLine}</div>`+newSec+availSec+upSec+pendSec+`<div class="panel" style="margin-top:10px;border-color:var(--emerald)"><div class="small" style="color:var(--emerald)"><b>Saved.</b> Character progression saved successfully.</div></div>`; U.modal('Level Up Complete', html); },
+  levelUp:classId=>{ const c=SM.act.get(); const before=SM.engine.alterationsFor(c).unlocked.map(function(a){return a.name;}); const abBefore=SM.engine.availableAbilities(c).map(function(a){return a.id;}); const r=SM.engine.addClassLevel(c,classId); if(r.ok===false){SM.ui.toast(r.msg,'bad');return;} SM.act.save(c); const cl=SM.engine.cls(classId); const lvl=(c.classes.find(function(y){return y.classId===classId;})||{}).level; SM.ui.toast(cl.name+' is now level '+lvl+'.','ok'); SM.engine.alterationsFor(c).unlocked.filter(function(a){return before.indexOf(a.name)<0;}).forEach(function(a){SM.ui.toast('Alteration unlocked: '+a.name+'.','info');}); SM.engine.availableAbilities(c).filter(function(a){return abBefore.indexOf(a.id)<0;}).forEach(function(a){SM.ui.toast('Ability available: '+a.name+'.','info');}); SM.ui.render(); },
+  chooseDisc:(classId,discId)=>{ const c=SM.act.get(); const x=c.classes.find(y=>y.classId===classId); if(x==null){ SM.ui.toast('Class not found.','bad'); return; } const dd=SM.engine.disc(discId); if(dd==null||((dd.cls===classId)===false)){ SM.ui.toast('That discipline does not belong to this class.','bad'); return; } x.discId=discId; SM.act.save(c); SM.ui.toast('Discipline: '+dd.name,'ok'); SM.ui.render(); },
   addClass:classId=>{ const c=SM.act.get(); if(!confirm('Add a level of '+SM.engine.cls(classId).name+' (multiclass)?'))return; SM.engine.addClassLevel(c,classId); SM.act.save(c); SM.ui.toast('Multiclassed into '+SM.engine.cls(classId).name+'!','ok'); SM.ui.render(); },
-  learnAbility:id=>{ const c=SM.act.get(); if(!c.abilities.includes(id))c.abilities.push(id); SM.act.save(c); SM.ui.toast('Ability learned.','ok'); SM.ui.render(); },
+  learnAbility:id=>{ const c=SM.act.get(); const _chk=SM.engine.canLearnAbility(c,id); if(_chk.ok===false){ SM.ui.toast(_chk.msg,'bad'); return; } c.abilities.push(id); SM.act.save(c); SM.ui.toast('Ability learned.','ok'); SM.ui.render(); },
   learnSpell:id=>{ const c=SM.act.get(); if(!c.spells.includes(id))c.spells.push(id); SM.act.save(c); SM.ui.toast('Spell learned.','ok'); SM.ui.render(); },
   editAttrs:()=>{ const c=SM.act.get(); SM.ui.modal('Edit Base Attributes','<div class="grid cols2">'+SM.data.ATTRS.map(a=>`<label class="fld"><span>${a.name}</span><input type="number" value="${c.attrsBase[a.id]}" onchange="SM.forge.setAttr('${a.id}',this.value)"></label>`).join('')+'</div><p class="small muted">Kin & Lineage bonuses are added automatically.</p>'); },
   setAttr:(a,v)=>{ const c=SM.act.get(); c.attrsBase[a]=+v||0; SM.act.save(c); }
+};
+
+/* ===================== SCREEN: PROGRESSION DASHBOARD ===================== */
+SM.screens.dashboard=()=>{ const E=SM.engine,U=SM.ui; const c=SM.act.get();
+  if(c==null) return U.need('No active character. Create or select one.')+`<div class="row" style="justify-content:center;gap:8px"><button class="btn primary" onclick="SM.ui.go('creator')">Create</button><button class="btn" onclick="SM.ui.go('selection')">Select</button></div>`;
+  const rew=E.progressionRewards(c); const tl=rew.totalLevel; const tier=rew.tier;
+  const classCount=rew.classes.length;
+  const discCount=rew.classes.filter(function(x){return (x.discId==null)===false;}).length;
+  const learnedCount=(Array.isArray(c.abilities)?c.abilities:[]).length;
+  const tp=E.tierProgress(c); const nm=E.nextMilestone(c);
+  let h=`<div class="row between" style="align-items:flex-start"><div><h2 style="margin:0">${U.esc(c.name||'Character')}</h2><div class="small muted">Progression Dashboard</div><div class="small storm" style="margin-top:2px">${U.esc(E.buildIdentity(c).label)}</div></div><div style="text-align:right"><span class="tier-badge tier-${tier}">${tier}</span><div class="small muted" style="margin-top:4px">Total Level ${tl}</div></div></div>`;
+  h+=`<div class="row" style="gap:8px;margin-top:8px"><button class="btn sm" onclick="SM.ui.go('sheet')">Character Sheet</button><button class="btn sm" onclick="SM.ui.go('forge')">Forge</button><button class="btn sm" onclick="SM.ui.go('build')">💠 Power & Build</button></div>`;
+  const stat=(label,val)=>`<div class="card" style="text-align:center"><div class="eyebrow">${label}</div><div style="font-size:1.5rem;font-weight:800;margin-top:2px">${val}</div></div>`;
+  h+=`<div class="section-head" style="margin-top:14px"><h3>Progression</h3></div><div class="grid cols">${stat('Total Level',tl)}${stat('Tier',`<span class="tier-badge tier-${tier}">${tier}</span>`)}${stat('Classes',classCount)}${stat('Class Levels',tl)}${stat('Disciplines',discCount)}${stat('Abilities Learned',learnedCount)}</div>`;
+  const tierText=tp.atTop?`Total Level ${tl} \u00b7 Maximum tier reached`:`Total Level ${tl} / ${tp.tierMax} \u00b7 ${tp.pct}% through ${tp.tier}`;
+  h+=`<div class="section-head" style="margin-top:16px"><h3>Tier Progress</h3></div><div class="panel"><div class="row between"><span class="tier-badge tier-${tp.tier}">${tp.tier}</span>${tp.atTop?'<span class="small muted">Top Tier</span>':`<span class="small muted">Next: <span class="tier-badge tier-${tp.nextTier}">${tp.nextTier}</span> at Total Level ${tp.nextAt}</span>`}</div><div class="bar" style="margin-top:8px" role="progressbar" aria-valuenow="${tp.pct}" aria-valuemin="0" aria-valuemax="100" aria-label="Tier progress ${tp.pct} percent"><i style="width:${tp.pct}%"></i></div><div class="small muted" style="margin-top:4px">${tierText}</div></div>`;
+  const mi=(o)=>`<div class="kv"><span class="k">${U.esc(o.label)}</span><span class="v">${U.esc(o.detail)}</span></div>`;
+  h+=`<div class="section-head" style="margin-top:16px"><h3>Next Milestone</h3></div><div class="panel"><div class="eyebrow storm">${U.esc(nm.primary.label)}</div><div style="font-weight:700;margin-top:2px">${U.esc(nm.primary.detail)}</div>${nm.list.length>1?`<hr class="sep">`+nm.list.filter(function(x){return (x===nm.primary)===false;}).map(mi).join(''):''}</div>`;
+  h+=`<div class="section-head" style="margin-top:16px"><h3>Class Progression</h3></div>`;
+  h+=rew.classes.map(function(x){
+    const pct=Math.round((Math.min(20,x.level)/20)*100);
+    const disc=(x.discId==null)?`<div class="small storm">Discipline choice required</div><div class="pill-row" style="margin-top:6px">`+E.discsFor(x.classId).map(function(dd){return `<button class="chip" onclick="SM.forge.chooseDisc('${x.classId}','${dd.id}')">${U.esc(dd.name)}</button>`;}).join('')+`</div>`:`<div class="small">Discipline: <b>${U.esc(x.discName||'')}</b></div>`;
+    const btn=(x.level>=20)?`<span class="tag">MAX CLASS LEVEL</span>`:`<button class="btn sm primary" onclick="SM.forge.previewLevelUp('${x.classId}')">Level Up \u2192</button>`;
+    return `<div class="panel" style="margin-top:8px"><div class="row between"><b>${U.esc(x.className)}</b><span class="small muted">Level ${x.level} / 20</span></div><div class="bar" style="margin-top:6px" role="progressbar" aria-valuenow="${x.level}" aria-valuemin="0" aria-valuemax="20" aria-label="${U.esc(x.className)} level ${x.level} of 20"><i style="width:${pct}%"></i></div><div class="small muted" style="margin-top:4px">${x.level} of 20 \u00b7 ${pct}%</div><div style="margin-top:8px">${disc}</div><div class="row" style="margin-top:8px">${btn}</div></div>`;
+  }).join('');
+  let learned=[],available=[],upcoming=[];
+  rew.classes.forEach(function(x){
+    (x.abilities.chosen||[]).forEach(function(a){ learned.push({a:a,x:x}); });
+    (x.abilities.available||[]).forEach(function(a){ available.push({a:a,x:x}); });
+    (x.abilities.upcoming||[]).forEach(function(a){ upcoming.push({a:a,x:x}); });
+  });
+  const abRow=(o,mode)=>{ const a=o.a,x=o.x; const dn=(a.disc==null)?null:(E.disc(a.disc)?E.disc(a.disc).name:a.disc);
+    const tags=`<span class="tag">${U.esc(x.className)}</span> <span class="tag">Lv ${a.level}</span>`+((dn==null)?'':` <span class="tag">${U.esc(dn)}</span>`);
+    const learnBtn=(mode==='available')?`<button class="btn sm primary" onclick="SM.forge.learnAbility('${a.id}')">Learn</button>`:'';
+    return `<div class="li" style="cursor:default"><div class="ava">\u2728</div><div class="meta"><div class="t">${U.esc(a.name)} ${tags}</div><div class="s">${U.esc(a.desc||'')}</div></div>${learnBtn}</div>`;
+  };
+  h+=`<div class="section-head" style="margin-top:16px"><h3>Ability Progression</h3></div>`;
+  h+=`<div class="eyebrow" style="margin-top:6px">Learned (${learned.length})</div>`+(learned.length>0?`<div class="list">`+learned.map(function(o){return abRow(o,'learned');}).join('')+`</div>`:`<div class="small muted">No abilities learned yet.</div>`);
+  h+=`<div class="eyebrow" style="margin-top:10px">Available (${available.length})</div>`+(available.length>0?`<div class="list">`+available.map(function(o){return abRow(o,'available');}).join('')+`</div>`:`<div class="small muted">Nothing available to learn right now.</div>`);
+  h+=`<div class="eyebrow" style="margin-top:10px">Upcoming (${upcoming.length})</div>`+(upcoming.length>0?`<div class="list">`+upcoming.map(function(o){return abRow(o,'upcoming');}).join('')+`</div>`:`<div class="small muted">No upcoming abilities.</div>`);
+  let pUnlocked=[],pUpcoming=[];
+  rew.classes.forEach(function(x){
+    (x.passives.unlocked||[]).forEach(function(p){ pUnlocked.push({p:p,x:x}); });
+    (x.passives.upcoming||[]).forEach(function(p){ pUpcoming.push({p:p,x:x}); });
+  });
+  if(pUnlocked.length>0||pUpcoming.length>0){
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Passive Progression</h3></div>`;
+    const paRow=(o)=>{ const p=o.p,x=o.x; return `<div class="li" style="cursor:default"><div class="ava">\uD83E\uDDEC</div><div class="meta"><div class="t">${U.esc(p.name)} <span class="tag">${U.esc(x.className)}</span> <span class="tag">Lv ${p.level}</span></div><div class="s">${U.esc(p.desc||'')}</div></div></div>`; };
+    if(pUnlocked.length>0) h+=`<div class="eyebrow" style="margin-top:6px">Active / Unlocked (${pUnlocked.length})</div><div class="list">`+pUnlocked.map(paRow).join('')+`</div>`;
+    if(pUpcoming.length>0) h+=`<div class="eyebrow" style="margin-top:10px">Upcoming (${pUpcoming.length})</div><div class="list">`+pUpcoming.map(paRow).join('')+`</div>`;
+  }
+  h+=`<div class="section-head" style="margin-top:16px"><h3>Recent Progression</h3></div>`;
+  let rp=[];
+  rp.push(`Reached Total Level ${tl}`);
+  rp.push(`Reached ${tier} Tier`);
+  rew.classes.forEach(function(x){ rp.push(`${x.className} at Level ${x.level}`); });
+  rew.classes.forEach(function(x){ if((x.discId==null)===false) rp.push(`Selected ${x.discName} discipline for ${x.className}`); });
+  if(learnedCount>0) rp.push(`Learned ${learnedCount} ${learnedCount===1?'ability':'abilities'}`);
+  h+=`<div class="panel">`+rp.map(function(s){return `<div class="small">&bull; ${U.esc(s)}</div>`;}).join('')+`<div class="small faint" style="margin-top:6px">Summary reflects current character state.</div></div>`;
+  return h;
+};
+
+/* ===================== SCREEN: POWER & BUILD SUMMARY ===================== */
+SM.build={
+  summaryHtml:function(c){ const E=SM.engine,U=SM.ui;
+    if(c==null) return U.need('No active character. Create or select one.')+`<div class="row" style="justify-content:center;gap:8px"><button class="btn primary" onclick="SM.ui.go('creator')">Create</button><button class="btn" onclick="SM.ui.go('selection')">Select</button></div>`;
+    const id=E.buildIdentity(c); const ps=E.powerSummary(c); const rew=E.progressionRewards(c);
+    const strengths=E.buildStrengths(c); const opps=E.buildOpportunities(c);
+    let h=`<div class="panel"><div class="row between" style="align-items:flex-start"><div><h2 style="margin:0">${U.esc(id.name||'Character')}</h2><div class="small muted">${U.esc(id.kin||'\u2014')} \u00b7 ${U.esc(id.lineage||'\u2014')}</div></div><div style="text-align:right"><span class="tier-badge tier-${id.tier}">${id.tier}</span><div class="small muted" style="margin-top:4px">Total Level ${id.totalLevel}</div></div></div><div class="storm" style="font-weight:800;font-size:1.1rem;margin-top:10px">${U.esc(id.label)}</div><div class="small muted">${id.hasClass?(id.multiclass?'Multiclass build':'Single-class build'):'No class selected yet'}</div><div class="row" style="gap:8px;margin-top:8px"><button class="btn sm" onclick="SM.ui.go('sheet')">Character Sheet</button><button class="btn sm" onclick="SM.ui.go('dashboard')">Progression</button></div></div>`;
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Build</h3></div>`;
+    if(id.classes.length===0){ h+=`<div class="panel"><div class="small storm">Choose your first class</div><div class="row" style="margin-top:8px"><button class="btn sm primary" onclick="SM.ui.go('forge')">Open Forge</button></div></div>`; }
+    else { h+=`<div class="stack">`+id.classes.map(function(x){ return `<div class="panel"><div class="row between"><b>${U.esc(x.name)} ${x.level}</b>${(x.discName==null)?'<span class="tag">Discipline pending</span>':`<span class="tag">${U.esc(x.discName)}</span>`}</div>${(x.discName==null)?`<div class="small storm" style="margin-top:4px">Discipline choice required</div>`:''}</div>`; }).join('')+`</div><div class="small muted" style="margin-top:6px">Multiclass total: ${id.totalLevel} across ${id.classes.length} ${id.classes.length===1?'class':'classes'}</div>`; }
+    const kv=(k,v)=>`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`;
+    let off=''; off+=kv('Attack Bonus', E.signed(ps.attackBonus)); off+=kv('Offensive Attribute', U.esc(E.attrName(ps.scaleAttr))+' '+E.signed(ps.mods[ps.scaleAttr]||0)); off+=kv('Weapon', ps.weapon?(U.esc(ps.weapon.name)+' ('+U.esc(ps.weapon.dmg)+')'):'Unarmed'); off+=kv('Save DC', ps.saveDC);
+    let dfn=''; dfn+=kv('Physical Defense', ps.defenses.physicalDefense); dfn+=kv('Magic Defense', ps.defenses.magicDefense); dfn+=kv('Evasion', E.signed(ps.defenses.evasion)); dfn+=kv('Block', ps.defenses.block); dfn+=kv('Max HP', ps.maxHP);
+    let utl=''; utl+=kv('Movement', ps.speed+' ft'); utl+=kv('Proficiency', E.signed(ps.profBonus)); utl+=kv(ps.resource.name==='\u2014'?'Resource':U.esc(ps.resource.name), ps.resource.max);
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Power</h3></div><div class="grid cols2"><div class="panel"><div class="eyebrow">Offense</div>${off}</div><div class="panel"><div class="eyebrow">Defense</div>${dfn}</div></div><div class="panel" style="margin-top:10px"><div class="eyebrow">Utility</div>${utl}</div>`;
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Attributes</h3></div><div class="grid cols">`+SM.data.ATTRS.map(function(at){ var v=ps.attrs[at.id]||0; var md=ps.mods[at.id]||0; return `<div class="card" style="text-align:center"><div class="eyebrow">${U.esc(at.name)}</div><div style="font-size:1.3rem;font-weight:800">${v}</div><div class="small muted">${E.signed(md)}</div></div>`; }).join('')+`</div>`;
+    let learned=[],available=[],upcoming=[];
+    rew.classes.forEach(function(x){ (x.abilities.chosen||[]).forEach(function(a){learned.push({a:a,x:x});}); (x.abilities.available||[]).forEach(function(a){available.push({a:a,x:x});}); (x.abilities.upcoming||[]).forEach(function(a){upcoming.push({a:a,x:x});}); });
+    const abLine=(o)=>`<div class="small">&bull; ${U.esc(o.a.name)} <span class="tag">${U.esc(o.x.className)} Lv ${o.a.level}</span></div>`;
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Abilities</h3></div><div class="panel"><div class="eyebrow">Learned (${learned.length})</div>${learned.length>0?learned.map(abLine).join(''):'<div class="small muted">None learned yet.</div>'}<div class="eyebrow" style="margin-top:8px">Available (${available.length})</div>${available.length>0?available.map(abLine).join(''):'<div class="small muted">Nothing available.</div>'}<div class="eyebrow" style="margin-top:8px">Upcoming (${upcoming.length})</div>${upcoming.length>0?upcoming.slice(0,6).map(abLine).join(''):'<div class="small muted">None upcoming.</div>'}</div>`;
+    let pun=[],pup=[];
+    rew.classes.forEach(function(x){ (x.passives.unlocked||[]).forEach(function(p){pun.push({p:p,x:x});}); (x.passives.upcoming||[]).forEach(function(p){pup.push({p:p,x:x});}); });
+    const paLine=(o)=>`<div class="small">&bull; ${U.esc(o.p.name)} <span class="tag">${U.esc(o.x.className)} Lv ${o.p.level}</span></div>`;
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Passives</h3></div><div class="panel"><div class="eyebrow">Active / Unlocked (${pun.length})</div>${pun.length>0?pun.map(paLine).join(''):'<div class="small muted">None active yet.</div>'}<div class="eyebrow" style="margin-top:8px">Upcoming (${pup.length})</div>${pup.length>0?pup.slice(0,6).map(paLine).join(''):'<div class="small muted">None upcoming.</div>'}</div>`;
+    const eq=(SM.act.SLOTS||[]).map(function(s){ var it=E.equippedItem(c,s[0]); if(it==null) return ''; var extra=''; if((it.dmg==null)===false)extra+=' <span class="tag">'+U.esc(it.dmg)+'</span>'; if((it.pdef==null)===false)extra+=' <span class="tag">PDef '+it.pdef+'</span>'; if((it.mdef==null)===false)extra+=' <span class="tag">MDef '+it.mdef+'</span>'; if((it.scale==null)===false)extra+=' <span class="tag">'+U.esc(it.scale)+'</span>'; return `<div class="li" style="cursor:default"><div class="ava">${s[2]}</div><div class="meta"><div class="t">${U.esc(it.name)}${extra}</div><div class="s">${U.esc(s[1])}</div></div></div>`; }).filter(function(x){return x.length>0;});
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Equipment</h3><button class="btn sm" onclick="SM.ui.go('equipment')">Manage</button></div>${eq.length>0?`<div class="list">`+eq.join('')+`</div>`:U.need('Nothing equipped.')}`;
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Build Strengths</h3></div><div class="panel">${strengths.map(function(s){return `<div class="small">&bull; ${U.esc(s.label)}</div>`;}).join('')}</div>`;
+    h+=`<div class="section-head" style="margin-top:16px"><h3>Next Build Opportunities</h3></div>`;
+    if(opps.length===0){ h+=`<div class="panel"><div class="small muted">No further progression available \u2014 maximum build reached.</div></div>`; }
+    else { h+=`<div class="panel">`+opps.slice(0,8).map(function(o){return `<div class="small">&bull; ${U.esc(o.label)}</div>`;}).join('')+`<div class="row" style="gap:8px;margin-top:10px"><button class="btn sm primary" onclick="SM.ui.go('dashboard')">Open Progression</button><button class="btn sm" onclick="SM.ui.go('forge')">Open Forge</button></div><div class="small faint" style="margin-top:6px">Informational \u2014 progression actions are taken in Progression or Forge.</div></div>`; }
+    return h;
+  }
+};
+SM.screens.build=()=>SM.build.summaryHtml(SM.act.get());
+
+/* ===================== SCREEN: CHARACTER ROSTER / MANAGEMENT ===================== */
+
+/* ===================== 4B-12 IMPORT / EXPORT / BACKUP (engine) ===================== */
+(function(E){
+  var FMT_CHAR='stormmythic-character', FMT_BACKUP='stormmythic-backup', FMT_VER=1;
+  E.IO={ CHAR:FMT_CHAR, BACKUP:FMT_BACKUP, VERSION:FMT_VER };
+  var clone=function(x){ return JSON.parse(JSON.stringify(x)); };
+  E.newCharId=function(){ return 'ch-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6); };
+  E.uniqueCharId=function(used){ used=used||{}; var id=E.newCharId(); var g=0; while(used[id]===true&&g<100000){ id=E.newCharId()+g.toString(36); g++; } return id; };
+
+  /* ---------- EXPORT ---------- */
+  E.exportCharacter=function(c){
+    if(c==null||(typeof c==='object')===false) return null;
+    var ch=E.migrateChar(clone(c)); if((c.id==null)===false) ch.id=c.id;
+    return { format:FMT_CHAR, formatVersion:FMT_VER, schemaVersion:SM.schema, exportedAt:new Date().toISOString(), character:ch };
+  };
+  E.exportCharacterJSON=function(c){ var e=E.exportCharacter(c); return (e==null)?null:JSON.stringify(e,null,2); };
+  E.exportBackup=function(){
+    var rows=E.store.rosterEntries().filter(function(en){ return en.kind==='valid'; });
+    var chars=rows.map(function(en){ return clone(en.char); });
+    return { format:FMT_BACKUP, formatVersion:FMT_VER, schemaVersion:SM.schema, exportedAt:new Date().toISOString(), activeCharacterId:E.store.activeId(), characters:chars };
+  };
+  E.exportBackupJSON=function(){ return JSON.stringify(E.exportBackup(),null,2); };
+
+  /* ---------- import-specific supplemental reference checks (warnings only) ---------- */
+  E.importSupplementWarnings=function(c){
+    var w=[];
+    (Array.isArray(c.spells)?c.spells:[]).forEach(function(sid){ if((sid==null)===false&&E.spell(sid)==null) w.push({code:'spell',msg:'Unknown spell reference: '+sid}); });
+    (Array.isArray(c.inventory)?c.inventory:[]).forEach(function(it){ var id=it&&it.itemId; if((id==null)===false&&E.item(id)==null) w.push({code:'equipment',msg:'Unknown equipment reference: '+id}); });
+    return w;
+  };
+
+  /* ---------- validate one record (reuses validateBuild) ---------- */
+  E.validateImportRecord=function(raw, idx){
+    var rec={ index:(idx==null?0:idx), valid:false, char:null, summary:null, errors:[], warnings:[], sourceId:null };
+    if(raw==null||(typeof raw==='object')===false||Array.isArray(raw)){ rec.errors.push({code:'character',msg:'Record is not a character object.'}); return rec; }
+    rec.sourceId=(typeof raw.id==='string'&&raw.id.length>0)?raw.id:null;
+    var m; try{ m=E.migrateChar(clone(raw)); }catch(e){ rec.errors.push({code:'character',msg:'Character could not be normalized.'}); return rec; }
+    if((rec.sourceId==null)===false) m.id=rec.sourceId;
+    m.totalLevel=E.totalLevel(m); m.tier=E.tierOf(m.totalLevel);
+    var vb=E.validateBuild(m,'saved');
+    rec.errors=vb.errors.slice();
+    rec.warnings=vb.warnings.slice().concat(E.importSupplementWarnings(m));
+    rec.char=m; rec.summary=E.characterSummary(m); rec.valid=(vb.valid===true);
+    return rec;
+  };
+
+  /* ---------- validate payload envelope ---------- */
+  E.validateImport=function(payload){
+    var res={ ok:false, fatal:false, kind:null, errors:[], warnings:[], activeCharacterId:null, records:[], counts:{total:0,valid:0,invalid:0} };
+    var data=payload;
+    if(typeof payload==='string'){
+      var t=payload.trim();
+      if(t.length===0){ res.fatal=true; res.errors.push({code:'empty',msg:'The file is empty.'}); return res; }
+      try{ data=JSON.parse(t); }catch(e){ res.fatal=true; res.errors.push({code:'json',msg:'This file is not valid JSON.'}); return res; }
+    }
+    if(data==null||(typeof data==='object')===false||Array.isArray(data)){ res.fatal=true; res.errors.push({code:'payload',msg:'Import data is not a StormMythic file.'}); return res; }
+    var fmt=data.format;
+    if((fmt===FMT_CHAR)===false&&(fmt===FMT_BACKUP)===false){ res.fatal=true; res.errors.push({code:'format',msg:'Unrecognized file format.'}); return res; }
+    var fv=data.formatVersion;
+    if(Number.isFinite(fv)===false||fv>FMT_VER){ res.fatal=true; res.errors.push({code:'formatVersion',msg:'Unsupported file version.'}); return res; }
+    var sv=data.schemaVersion;
+    if(Number.isFinite(sv)===false||sv>SM.schema){ res.fatal=true; res.errors.push({code:'schemaVersion',msg:'Unsupported character schema version.'}); return res; }
+    if(fmt===FMT_CHAR){
+      res.kind='character';
+      if(data.character==null||(typeof data.character==='object')===false){ res.fatal=true; res.errors.push({code:'character',msg:'No character found in this file.'}); return res; }
+      res.records.push(E.validateImportRecord(data.character,0));
+    } else {
+      res.kind='backup';
+      if(Array.isArray(data.characters)===false){ res.fatal=true; res.errors.push({code:'characters',msg:'No characters array found in this backup.'}); return res; }
+      res.activeCharacterId=(typeof data.activeCharacterId==='string')?data.activeCharacterId:null;
+      data.characters.forEach(function(rc,i){ res.records.push(E.validateImportRecord(rc,i)); });
+    }
+    res.counts.total=res.records.length;
+    res.counts.valid=res.records.filter(function(r){ return r.valid===true; }).length;
+    res.counts.invalid=res.counts.total-res.counts.valid;
+    res.ok=(res.counts.valid>0);
+    return res;
+  };
+
+  /* ---------- resolve ids (collision-safe) ---------- */
+  E.resolveImportIds=function(records, existingIds, mode){
+    mode=(mode==='replace')?'replace':'add';
+    var used={}; (existingIds||[]).forEach(function(id){ if((id==null)===false) used[id]=true; });
+    var batch={};
+    (records||[]).forEach(function(r){
+      if((r.valid===true)===false) return;
+      var origId=(r.char&&typeof r.char.id==='string'&&r.char.id.length>0)?r.char.id:null;
+      var newId=origId, remapped=false, willReplace=false;
+      if(origId==null){ newId=E.uniqueCharId(used); remapped=true; }
+      else if(mode==='replace'){
+        if(batch[origId]===true){ newId=E.uniqueCharId(used); remapped=true; }
+        else { newId=origId; willReplace=(used[origId]===true); }
+      } else {
+        if(used[origId]===true||batch[origId]===true){ newId=E.uniqueCharId(used); remapped=true; }
+        else newId=origId;
+      }
+      batch[newId]=true; used[newId]=true;
+      r.originalId=origId; r.resolvedId=newId; r.remapped=remapped; r.willReplace=willReplace;
+    });
+    return records;
+  };
+
+  /* ---------- commit (atomic-style: prepare, then single write) ---------- */
+  E.commitImport=function(records, opts){
+    opts=opts||{}; var mode=(opts.mode==='replace')?'replace':'add';
+    var summary={ added:0, replaced:0, remapped:0, rejected:0, ids:[] };
+    var valids=(records||[]).filter(function(r){ return r.valid===true; });
+    summary.rejected=(records||[]).length-valids.length;
+    var next=E.store.rawChars().slice();
+    valids.forEach(function(r){
+      var ch=clone(r.char);
+      var id=r.resolvedId||ch.id||E.newCharId();
+      ch.id=id; ch.updated=Date.now(); if(ch.created==null) ch.created=Date.now();
+      if(r.remapped===true) summary.remapped++;
+      var idx=next.findIndex(function(x){ return x&&x.id===id; });
+      if(idx>=0){ next[idx]=ch; summary.replaced++; } else { next.push(ch); summary.added++; }
+      summary.ids.push(id);
+    });
+    E.store.saveChars(next);
+    if((opts.restoreActiveId==null)===false){
+      var target=opts.restoreActiveId;
+      var mt=(records||[]).find(function(r){ return r.originalId===target&&r.resolvedId; });
+      if(mt) target=mt.resolvedId;
+      if((E.store.getChar(target)==null)===false) E.store.setActive(target);
+    }
+    var act=E.store.activeId();
+    if(act==null||E.store.getChar(act)==null){ var first=E.store.chars()[0]; E.store.setActive(first?first.id:null); }
+    return summary;
+  };
+})(SM.engine);
+
+/* ===================== 4B-12 IMPORT / EXPORT (UI) ===================== */
+SM.io={
+  _pending:null,
+  safeName:function(s){ s=String(s==null?'Hero':s).replace(/[^A-Za-z0-9_\- ]+/g,'').replace(/\s+/g,'_').replace(/^_+|_+$/g,''); return s.slice(0,40)||'Hero'; },
+  today:function(){ try{ return new Date().toISOString().slice(0,10); }catch(e){ return 'backup'; } },
+  download:function(filename, text){
+    try{
+      var blob=new Blob([text],{type:'application/json'});
+      var url=URL.createObjectURL(blob);
+      var a=document.createElement('a'); a.href=url; a.download=filename; a.style.display='none';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(function(){ try{ URL.revokeObjectURL(url); }catch(e){} },0);
+      return true;
+    }catch(e){
+      SM.ui.modal('Export \u2014 '+SM.ui.esc(filename), '<p class="small muted">Copy this JSON and save it as a .json file.</p><textarea style="min-height:240px" onclick="this.select()" aria-label="Export JSON">'+SM.ui.esc(text)+'</textarea>');
+      return false;
+    }
+  },
+  exportChar:function(id){
+    var c=SM.engine.store.getChar(id);
+    if(c==null){ SM.ui.toast('Character not found.','bad'); return; }
+    var json=SM.engine.exportCharacterJSON(c);
+    if(json==null){ SM.ui.toast('Could not export character.','bad'); return; }
+    SM.io.download('StormMythic_'+SM.io.safeName(c.name)+'.json', json);
+    SM.ui.toast('Exported '+(c.name||'character')+'.','ok');
+  },
+  backup:function(){
+    var rows=SM.engine.store.rosterEntries().filter(function(en){ return en.kind==='valid'; });
+    if(rows.length===0){ SM.ui.toast('No characters to back up.','info'); return; }
+    SM.io.download('StormMythic_Backup_'+SM.io.today()+'.json', SM.engine.exportBackupJSON());
+    SM.ui.toast('Backup exported ('+rows.length+' character'+(rows.length===1?'':'s')+').','ok');
+  },
+  openImport:function(){
+    SM.io._pending=null;
+    var html=''
+      +'<p class="small muted">Import a StormMythic character or a full backup. Existing characters are never overwritten by default.</p>'
+      +'<label class="small" for="ioFile">Choose a .json file</label>'
+      +'<input type="file" id="ioFile" accept="application/json,.json" onchange="SM.io.onFile(event)" aria-label="Choose a StormMythic JSON file" />'
+      +'<p class="small muted" style="margin-top:12px">or paste JSON</p>'
+      +'<textarea id="ioPaste" style="min-height:150px" aria-label="Paste StormMythic JSON"></textarea>'
+      +'<div class="row" style="margin-top:12px;gap:8px"><button class="btn primary" onclick="SM.io.fromPaste()">Preview Import</button><button class="btn" onclick="SM.io.cancel()">Cancel</button></div>';
+    SM.ui.modal('Import / Restore', html);
+  },
+  onFile:function(evt){
+    try{
+      var f=(evt&&evt.target&&evt.target.files)?evt.target.files[0]:null;
+      if(f==null){ return; }
+      if((f.size==null)===false&&f.size>3000000){ SM.ui.toast('That file is too large to import.','bad'); return; }
+      var rd=new FileReader();
+      rd.onload=function(){ SM.io.preview(String(rd.result==null?'':rd.result)); };
+      rd.onerror=function(){ SM.ui.toast('Could not read that file.','bad'); };
+      rd.readAsText(f);
+    }catch(e){ SM.ui.toast('Could not read that file.','bad'); }
+  },
+  fromPaste:function(){
+    var el=document.getElementById('ioPaste'); var txt=el?el.value:'';
+    if(txt==null||String(txt).trim().length===0){ SM.ui.toast('Paste some JSON first.','info'); return; }
+    SM.io.preview(String(txt));
+  },
+  preview:function(text){
+    var res=SM.engine.validateImport(text);
+    SM.io._pending=null;
+    if(res.fatal===true){
+      var em=(res.errors[0]&&res.errors[0].msg)||'This file is not a valid StormMythic import.';
+      SM.ui.modal('Import \u2014 Problem', '<p role="alert" class="small" style="color:#ff6b6b">'+SM.ui.esc(em)+'</p><div class="row" style="margin-top:12px"><button class="btn" onclick="SM.io.cancel()">Close</button></div>');
+      return res;
+    }
+    var existing=SM.engine.store.chars().map(function(c){ return c.id; });
+    SM.engine.resolveImportIds(res.records, existing, 'add');
+    SM.io._pending={ result:res };
+    var rows=res.records.map(function(r,i){
+      if((r.valid===true)===false){
+        var msg=(r.errors[0]&&r.errors[0].msg)||'Invalid character.';
+        return '<div class="panel" role="group" style="border-color:#8a6a25;margin-top:6px"><b>\u26a0\ufe0f Record '+(i+1)+' rejected</b><div class="small muted">'+SM.ui.esc(msg)+'</div></div>';
+      }
+      var s=r.summary;
+      var tags=[];
+      tags.push(r.remapped===true?'<span class="tier-badge">ID remapped</span>':'<span class="tier-badge">New character</span>');
+      if(r.warnings&&r.warnings.length>0) tags.push('<span class="small faint">'+SM.ui.esc(r.warnings.map(function(w){return w.msg;}).join(' \u00b7 '))+'</span>');
+      return '<div class="card" role="group" style="margin-top:6px"><div class="row between"><b>'+SM.ui.esc(s.name||'Unnamed')+'</b><span class="small muted">'+SM.ui.esc(s.tier)+' '+s.totalLevel+'</span></div>'
+        +'<div class="small muted">'+SM.ui.esc((s.kin||'Unknown')+' \u00b7 '+(s.lineage||'\u2014')+' \u00b7 '+(s.classesLabel||'No class'))+'</div>'
+        +'<div class="row" style="gap:6px;margin-top:4px">'+tags.join(' ')+'</div></div>';
+    }).join('');
+    var summ=(res.kind==='backup')
+      ? (res.counts.total+' character'+(res.counts.total===1?'':'s')+' found \u00b7 '+res.counts.valid+' ready'+(res.counts.invalid>0?(' \u00b7 '+res.counts.invalid+' rejected'):''))
+      : (res.counts.valid>0?'1 character ready to import':'This character cannot be imported');
+    var canImport=(res.counts.valid>0);
+    var actions='<div class="row" style="margin-top:12px;gap:8px">';
+    if(canImport){ actions+='<button class="btn primary" onclick="SM.io.confirmImport(\'add\')">Import as New</button><button class="btn" onclick="SM.io.confirmImport(\'replace\')" aria-label="Replace characters that share an ID">Replace Existing</button>'; }
+    actions+='<button class="btn" onclick="SM.io.cancel()">Cancel</button></div>';
+    SM.ui.modal('Import Preview', '<p class="small" role="status">'+SM.ui.esc(summ)+'</p>'+rows+actions);
+    return res;
+  },
+  confirmImport:function(mode){
+    var p=SM.io._pending;
+    if(p==null||p.result==null){ SM.ui.toast('Nothing to import.','info'); return null; }
+    var res=p.result;
+    if(res.counts.valid<=0){ SM.ui.toast('Nothing to import.','info'); return null; }
+    mode=(mode==='replace')?'replace':'add';
+    var existing=SM.engine.store.chars().map(function(c){ return c.id; });
+    SM.engine.resolveImportIds(res.records, existing, mode);
+    var opts={ mode:mode };
+    if(res.kind==='backup') opts.restoreActiveId=res.activeCharacterId;
+    var sum=SM.engine.commitImport(res.records, opts);
+    SM.io._pending=null;
+    SM.ui.closeModal();
+    var parts=[]; if(sum.added>0)parts.push(sum.added+' added'); if(sum.replaced>0)parts.push(sum.replaced+' replaced'); if(sum.remapped>0)parts.push(sum.remapped+' re-IDed'); if(sum.rejected>0)parts.push(sum.rejected+' rejected');
+    SM.ui.toast('Import complete: '+(parts.join(', ')||'no changes')+'.', ((sum.added+sum.replaced)>0)?'ok':'info');
+    SM.ui.render();
+    return sum;
+  },
+  cancel:function(){ SM.io._pending=null; SM.ui.closeModal(); }
+};
+
+
+SM.screens.roster=()=>{ const E=SM.engine,U=SM.ui;
+  var entries=E.store.rosterEntries(); var activeId=E.store.activeId();
+  var head=`<div class="section-head"><h3>Characters</h3><button class="btn primary sm" onclick="SM.roster.newChar()" aria-label="Create a new character">+ New Character</button> <button class="btn sm" onclick="SM.io.openImport()" aria-label="Import a character or backup file">Import</button> <button class="btn sm" onclick="SM.io.backup()" aria-label="Export all characters as a backup file">Backup All</button></div>`;
+  if(entries.length===0){ return head+`<div class="panel" style="text-align:center" role="status"><div style="font-size:2rem">\uD83D\uDDC2\uFE0F</div><h3 style="margin:6px 0">No heroes forged yet.</h3><p class="muted small">Create your first StormMythic character.</p><button class="btn primary" onclick="SM.roster.newChar()">Create Character</button></div>`; }
+  var cards=entries.map(function(en){
+    if(en.kind==='malformed'){ return `<div class="panel" role="group" aria-label="Character needs attention" style="border-color:#8a6a25;margin-top:8px"><div class="row between"><b>\u26a0\ufe0f Character data needs attention</b></div><div class="small muted" style="margin-top:4px">${U.esc(en.reason||'This record could not be read.')}</div>`+((en.id==null)?'':`<div class="row" style="margin-top:8px;gap:6px"><button class="btn ghost sm" onclick="SM.roster.recover('${en.id}')">Attempt Recovery</button><button class="btn danger sm" onclick="SM.roster.confirmDelete('${en.id}')">Delete</button></div>`)+`</div>`; }
+    var s=en.summary; var isActive=(en.id===activeId);
+    var kinIcon=(E.kin(en.char.kinId)||{}).icon||'\uD83E\uDDDD';
+    var warn=(en.warnings&&en.warnings.length>0)?`<div class="small faint" style="margin-top:4px">${U.esc(en.warnings.map(function(w){return w.msg;}).join(' \u00b7 '))}</div>`:'';
+    var dupWarn=en.duplicateId?`<div class="small" style="color:#ff6b6b;margin-top:2px">Duplicate ID detected.</div>`:'';
+    var acts = isActive
+      ? `<button class="btn sm" onclick="SM.ui.go('sheet')">Open Sheet</button><button class="btn sm" onclick="SM.ui.go('dashboard')">Progression</button><button class="btn sm" onclick="SM.ui.go('build')">Build</button>`
+      : `<button class="btn sm primary" onclick="SM.roster.play('${en.id}')" aria-label="Play ${U.esc(s.name)}">Play</button>`;
+    acts += `<button class="btn sm" onclick="SM.roster.rename('${en.id}')">Rename</button><button class="btn sm" onclick="SM.roster.duplicate('${en.id}')">Duplicate</button><button class="btn sm" onclick="SM.io.exportChar('${en.id}')" aria-label="Export character">Export</button><button class="btn danger sm" onclick="SM.roster.confirmDelete('${en.id}')">Delete</button>`;
+    return `<div class="card" role="group" aria-label="${U.esc(s.name)}${isActive?' (active)':''}" style="margin-top:8px${isActive?';border-color:var(--storm-glow)':''}">
+      <div class="row between">
+        <div class="row" style="gap:10px"><div class="ava">${kinIcon}</div>
+          <div class="meta"><div class="t">${U.esc(s.name)} ${isActive?'<span class="tag" style="background:var(--storm-lo);color:#eafcff">ACTIVE</span>':''}</div>
+            <div class="s">${U.esc(s.kin||'\u2014')}${s.lineage?(' \u00b7 '+U.esc(s.lineage)):''}</div></div></div>
+        <div style="text-align:right"><span class="tier-badge tier-${s.tier}">${s.tier}</span><div class="small muted" style="margin-top:2px">Total ${s.totalLevel}</div></div>
+      </div>
+      <div class="small" style="margin-top:6px">${s.hasClass?U.esc(s.classesLabel):'No class'}${s.discLabel?(' <span class="storm">\u00b7 '+U.esc(s.discLabel)+'</span>'):''}</div>
+      ${dupWarn}${warn}
+      <div class="row" style="margin-top:10px;gap:6px;flex-wrap:wrap">${acts}</div></div>`;
+  }).join('');
+  return head+cards;
+};
+SM.roster={
+  newChar:function(){ SM.creator.start(); SM.ui.go('creator'); },
+  play:function(id){ var c=SM.engine.store.getChar(id); if(c==null){ SM.ui.toast('Character not found.','bad'); SM.ui.render(); return; } SM.engine.store.setActive(id); SM.ui.toast('Now playing '+(c.name||'hero')+'.','ok'); SM.ui.go('sheet'); },
+  rename:function(id){ var c=SM.engine.store.getChar(id); if(c==null){ SM.ui.toast('Character not found.','bad'); return; } SM.ui.modal('Rename Character', `<label class="fld"><span>Character name</span><input id="rnBox" type="text" value="${SM.ui.esc(c.name||'')}" aria-label="Character name"></label><div class="row" style="gap:8px;margin-top:10px"><button class="btn primary" onclick="SM.roster.doRename('${id}')">Save</button><button class="btn ghost" onclick="SM.ui.closeModal()">Cancel</button></div>`); },
+  doRename:function(id){ var c=SM.engine.store.getChar(id); if(c==null)return; var el=document.getElementById('rnBox'); var nm=el?String(el.value||'').trim():''; if(nm.length===0){ SM.ui.toast('Name cannot be empty.','bad'); return; } c.name=nm; SM.engine.store.upsertChar(c); SM.ui.closeModal(); SM.ui.toast('Renamed to '+nm+'.','ok'); SM.ui.render(); },
+  duplicate:function(id){ var c=SM.engine.store.getChar(id); if(c==null){ SM.ui.toast('Character not found.','bad'); return; } var copy=JSON.parse(JSON.stringify(c)); copy.id='ch-'+Date.now().toString(36)+Math.random().toString(36).slice(2,6); copy.name=String(c.name||'Hero')+' Copy'; copy.created=Date.now(); copy.updated=Date.now(); SM.engine.validateBuild(copy,'saved'); SM.engine.store.upsertChar(copy); SM.ui.toast('Duplicated as '+copy.name+'.','ok'); SM.ui.render(); },
+  confirmDelete:function(id){ var c=SM.engine.store.getChar(id); var nm=c?(c.name||'this character'):'this character'; SM.ui.modal('Delete Character', `<p role="alert">Delete <b>${SM.ui.esc(nm)}</b>? This cannot be undone.</p><div class="row" style="gap:8px;margin-top:10px"><button class="btn danger" onclick="SM.roster.doDelete('${id}')">Delete</button><button class="btn ghost" onclick="SM.ui.closeModal()">Cancel</button></div>`); },
+  doDelete:function(id){ SM.engine.store.deleteCharSafe(id); SM.ui.closeModal(); SM.ui.toast('Character deleted.','info'); SM.ui.render(); },
+  recover:function(id){ var raw=SM.engine.store.rawChars().find(function(r){return r&&r.id===id;}); if(raw==null){ SM.ui.toast('Record not found.','bad'); return; } var fixed=SM.engine.sanitizeBuild(raw); fixed.id=id; SM.engine.store.upsertChar(fixed); SM.ui.toast('Recovery attempted. Review the character.','info'); SM.ui.render(); }
 };
 
 /* ===================== SCREEN: DICE ROLLER ===================== */
@@ -2429,6 +2970,245 @@ SM.data.DISC_DETAIL={"stormheart": {"loreLong": "Stormheart berserkers let their
 SM.data.CLASSES.forEach(function(c){var x=SM.data.CLASS_DETAIL[c.id];if(x){c.loreLong=x.loreLong;c.signature=x.signature;}});
 SM.data.DISCIPLINES.forEach(function(y){var x=SM.data.DISC_DETAIL[y.id];if(x){y.loreLong=x.loreLong;y.abilities=x.abilities;y.alterations=x.alterations;}});
 SM.engine.alterationsFor=function(c){var un=[],up=[];(c.classes||[]).forEach(function(y){var dd=SM.engine.disc(y.discId);if(dd==null||dd.alterations==null)return;dd.alterations.forEach(function(a){var rec={name:a.name,level:a.level,desc:a.desc,disc:dd.name};if(y.level>=a.level)un.push(rec);else up.push(rec);});});un.sort(function(p,q){return p.level-q.level;});up.sort(function(p,q){return p.level-q.level;});return {unlocked:un,upcoming:up};};
+(function(E){
+  E.canLearnAbility=function(c,id){
+    var ab=E.ability(id);
+    if(ab==null) return {ok:false,msg:'Unknown ability.'};
+    var classIds=(c&&Array.isArray(c.classes))?c.classes.map(function(x){return x.classId;}):[];
+    if(classIds.indexOf(ab.cls)<0) return {ok:false,msg:'That ability belongs to a class you do not have.'};
+    if((c&&Array.isArray(c.abilities)?c.abilities:[]).indexOf(id)>=0) return {ok:false,msg:'Ability already learned.'};
+    var cl=(c.classes||[]).find(function(x){return x.classId===ab.cls;});
+    if(cl==null) return {ok:false,msg:'Class not found.'};
+    if((ab.disc==null)===false){ if((cl.discId===ab.disc)===false) return {ok:false,msg:'That ability requires a different discipline.'}; }
+    if(ab.level>cl.level) return {ok:false,msg:'Class level too low for that ability.'};
+    return {ok:true};
+  };
+  E.progressionRewards=function(c){
+    if(c==null){ return {totalLevel:0, tier:E.tierOf(0), classes:[]}; }
+    var classes=(c&&Array.isArray(c.classes))?c.classes:[];
+    var owned=(c&&Array.isArray(c.abilities))?c.abilities:[];
+    var out=[];
+    classes.forEach(function(x){
+      var cl=E.cls(x.classId); var dd=(x.discId==null)?null:E.disc(x.discId);
+      var lvl=(typeof x.level==='number')?x.level:0;
+      var clsAb=SM.data.ABILITIES.filter(function(a){return a.cls===x.classId;});
+      var discOk=function(a){ return (a.disc==null)||(((dd==null)===false)&&(a.disc===dd.id)); };
+      var available=clsAb.filter(function(a){return discOk(a)&&(a.level<=lvl)&&(owned.indexOf(a.id)<0);});
+      var upcoming=clsAb.filter(function(a){return discOk(a)&&(a.level>lvl);});
+      var chosen=owned.map(function(id){return E.ability(id);}).filter(function(a){return ((a==null)===false)&&(a.cls===x.classId);});
+      var pun=[],pup=[];
+      if(((dd==null)===false)&&Array.isArray(dd.alterations)){ dd.alterations.forEach(function(al){ var rec={name:al.name,level:al.level,desc:al.desc,disc:dd.name}; if(lvl>=al.level)pun.push(rec); else pup.push(rec); }); }
+      var pending=[];
+      if(x.discId==null) pending.push({type:'discipline',classId:x.classId,msg:'Choose a discipline for '+(cl?cl.name:x.classId)+'.'});
+      out.push({classId:x.classId, className:cl?cl.name:x.classId, level:lvl, discId:x.discId||null, discName:dd?dd.name:null, abilities:{available:available,upcoming:upcoming,chosen:chosen}, passives:{unlocked:pun,upcoming:pup}, pending:pending});
+    });
+    return {totalLevel:E.totalLevel(c), tier:E.tierOf(E.totalLevel(c)), classes:out};
+  };
+  E.levelUpPreview=function(c,classId){
+    if(E.cls(classId)==null) return {ok:false,msg:'Unknown class.'};
+    var cur=(c&&Array.isArray(c.classes))?c.classes.find(function(x){return x.classId===classId;}):null;
+    var prev=cur?((typeof cur.level==='number')?cur.level:0):0;
+    if(prev>=20) return {ok:false,msg:'Class already at maximum level (20).',classId:classId,prevLevel:prev,newLevel:prev};
+    var sim={}; for(var k in c){ if(Object.prototype.hasOwnProperty.call(c,k)) sim[k]=c[k]; }
+    sim.classes=(c.classes||[]).map(function(x){var e={}; for(var kk in x){ if(Object.prototype.hasOwnProperty.call(x,kk)) e[kk]=x[kk]; } return e;});
+    var scur=sim.classes.find(function(x){return x.classId===classId;});
+    if(scur==null){ scur={classId:classId,level:0,discId:null}; sim.classes.push(scur); }
+    scur.level=prev+1;
+    function findCls(rep){ return rep.classes.find(function(y){return y.classId===classId;})||{abilities:{available:[],upcoming:[]},passives:{unlocked:[]}}; }
+    var b=findCls(E.progressionRewards(c)), a=findCls(E.progressionRewards(sim));
+    var bAb={}; b.abilities.available.forEach(function(x){bAb[x.id]=true;});
+    var newAbilities=a.abilities.available.filter(function(x){return bAb[x.id]==null;});
+    var bP={}; b.passives.unlocked.forEach(function(x){bP[x.name]=true;});
+    var newPassives=a.passives.unlocked.filter(function(x){return bP[x.name]==null;});
+    return {ok:true,classId:classId,prevLevel:prev,newLevel:prev+1,newAbilities:newAbilities,newPassives:newPassives};
+  };
+})(SM.engine);
+
+(function(E){
+  E.tierProgress=function(c){
+    var total=(c&&Array.isArray(c.classes))?E.totalLevel(c):0; var name=E.tierOf(total);
+    var cur=null; for(var i=0;i<E.TIERS.length;i++){ if(E.TIERS[i].name===name){ cur=E.TIERS[i]; break; } }
+    if(cur==null) cur={name:name,min:1,max:20};
+    var next=null; for(var j=0;j<E.TIERS.length;j++){ if(E.TIERS[j].min>cur.max){ if(next==null||E.TIERS[j].min<next.min) next=E.TIERS[j]; } }
+    var span=(cur.max-cur.min+1); var into=(total-cur.min+1); if(into<0)into=0; if(into>span)into=span;
+    var pct=span>0?Math.round((into/span)*100):0; if(pct<0)pct=0; if(pct>100)pct=100;
+    return { tier:name, total:total, tierMin:cur.min, tierMax:cur.max, into:into, span:span, pct:pct,
+             nextTier:(next==null)?null:next.name, nextAt:(next==null)?null:next.min, atTop:(next==null) };
+  };
+  E.nextMilestone=function(c){
+    var rew=E.progressionRewards(c); var list=[]; var primary=null;
+    var pend=null;
+    rew.classes.forEach(function(x){ if(pend==null&&Array.isArray(x.pending)&&x.pending.length>0) pend=x; });
+    if((pend==null)===false){ var d={type:'discipline',label:'Discipline Choice Required',detail:pend.className+' \u2014 choose a discipline',classId:pend.classId}; list.push(d); if(primary==null)primary=d; }
+    var avAb=null, avCls=null;
+    rew.classes.forEach(function(x){ if(avAb==null){ var a=(x.abilities.available||[])[0]; if((a==null)===false){ avAb=a; avCls=x; } } });
+    if((avAb==null)===false){ var d2={type:'ability-available',label:'Ability Available',detail:avAb.name+' ('+avCls.className+' Lv '+avAb.level+')',id:avAb.id}; list.push(d2); if(primary==null)primary=d2; }
+    var upAb=null, upCls=null;
+    rew.classes.forEach(function(x){ (x.abilities.upcoming||[]).forEach(function(a){ if(upAb==null||a.level<upAb.level){ upAb=a; upCls=x; } }); });
+    if((upAb==null)===false){ list.push({type:'ability-upcoming',label:'Next Ability',detail:upAb.name+' ('+upCls.className+' Lv '+upAb.level+')'}); }
+    var upPa=null, upPaCls=null;
+    rew.classes.forEach(function(x){ (x.passives.upcoming||[]).forEach(function(p){ if(upPa==null||p.level<upPa.level){ upPa=p; upPaCls=x; } }); });
+    if((upPa==null)===false){ list.push({type:'passive-upcoming',label:'Next Passive',detail:upPa.name+' ('+upPaCls.className+' Lv '+upPa.level+')'}); }
+    var nc=null;
+    rew.classes.forEach(function(x){ if(x.level<20){ if(nc==null||x.level<nc.level) nc=x; } });
+    if((nc==null)===false){ var d3={type:'class-level',label:'Next Class Level',detail:nc.className+' '+(nc.level+1),classId:nc.classId}; list.push(d3); if(primary==null)primary=d3; }
+    var tp=E.tierProgress(c);
+    if(tp.atTop===false&&(tp.nextTier==null)===false){ var d4={type:'tier',label:'Next Tier',detail:tp.nextTier+' at Total Level '+tp.nextAt}; list.push(d4); if(primary==null)primary=d4; }
+    if(primary==null){ primary={type:'complete',label:'Progression Complete',detail:'All classes at maximum level.'}; }
+    return { primary:primary, list:list };
+  };
+})(SM.engine);
+
+(function(E){
+  E.buildIdentity=function(c){
+    if(c==null) return {name:'', kin:null, lineage:null, totalLevel:0, tier:E.tierOf(0), classes:[], multiclass:false, hasClass:false, label:'Choose your first class'};
+    var k=E.kin(c.kinId), l=E.lineage(c.lineageId);
+    var tl=E.totalLevel(c), tier=E.tierOf(tl);
+    var cls=(c.classes||[]).map(function(x){ var cl=E.cls(x.classId); var d=(x.discId==null)?null:E.disc(x.discId); return {classId:x.classId, name:cl?cl.name:x.classId, level:x.level, discId:x.discId||null, discName:d?d.name:null}; });
+    var hasClass=cls.length>0; var multiclass=cls.length>1; var label;
+    if(hasClass===false){ label='Choose your first class'; }
+    else if(multiclass){ label=tier+' '+tl+' \u2014 '+cls.map(function(x){return x.name+' '+x.level;}).join(' / '); }
+    else { var only=cls[0]; label=tier+' '+only.level+' '+only.name+(only.discName?(' ('+only.discName+')'):''); }
+    return {name:c.name||'', kin:k?k.name:null, lineage:l?l.name:null, totalLevel:tl, tier:tier, classes:cls, multiclass:multiclass, hasClass:hasClass, label:label};
+  };
+  E.powerSummary=function(c){
+    if(c==null) return null;
+    var a=E.attrs(c), m=E.mods(c), def=E.defenses(c);
+    var atk=E.attackBonus(c), spd=E.speed(c), tl=E.totalLevel(c), pb=E.profBonus(tl);
+    var res=E.resource(c), hp=E.maxHP(c);
+    var pc=E.primaryClass(c); var pKey=(pc&&pc.primary&&pc.primary[0])?pc.primary[0]:'MIG';
+    var saveDC=8+pb+(m[pKey]||0);
+    var w=E.equippedItem(c,'weapon'); var scaleKey=w?w.scale:'MIG';
+    return { attrs:a, mods:m, defenses:def, attackBonus:atk, speed:spd, profBonus:pb, saveDC:saveDC,
+             resource:res, maxHP:hp, primaryAttr:pKey, scaleAttr:scaleKey,
+             weapon:w?{name:w.name,dmg:w.dmg,scale:w.scale}:null };
+  };
+  E.buildStrengths=function(c){
+    var out=[]; if(c==null) return out;
+    var ps=E.powerSummary(c); var rew=E.progressionRewards(c); var def=ps.defenses;
+    if(ps.attackBonus>=5) out.push({type:'offense',label:'High attack bonus ('+E.signed(ps.attackBonus)+')'});
+    else if(ps.attackBonus>=3) out.push({type:'offense',label:'Solid attack bonus ('+E.signed(ps.attackBonus)+')'});
+    if(def.physicalDefense>=15) out.push({type:'defense',label:'Strong physical defense ('+def.physicalDefense+')'});
+    else if(def.physicalDefense>=12) out.push({type:'defense',label:'Good physical defense ('+def.physicalDefense+')'});
+    if(def.magicDefense>=4) out.push({type:'defense',label:'Strong magic defense ('+def.magicDefense+')'});
+    if(def.evasion>=4) out.push({type:'defense',label:'High evasion ('+E.signed(def.evasion)+')'});
+    if(def.block>0) out.push({type:'defense',label:'Shield block ('+def.block+')'});
+    var classCount=rew.classes.length;
+    if(classCount>1) out.push({type:'utility',label:'Versatile multiclass ('+classCount+' classes)'});
+    var discCount=rew.classes.filter(function(x){return (x.discId==null)===false;}).length;
+    if(discCount>1) out.push({type:'utility',label:'Multiple disciplines ('+discCount+')'});
+    var learned=(Array.isArray(c.abilities)?c.abilities:[]).length;
+    if(learned>=5) out.push({type:'utility',label:'Large ability pool ('+learned+' learned)'});
+    var eqCount=(c.inventory||[]).filter(function(i){return i.equipped;}).length;
+    if(eqCount>=3) out.push({type:'utility',label:'Strong equipment loadout ('+eqCount+' equipped)'});
+    if(out.length===0) out.push({type:'info',label:'Developing build \u2014 level up and choose disciplines to grow your strengths.'});
+    return out;
+  };
+  E.buildOpportunities=function(c){
+    var out=[]; if(c==null) return out;
+    var rew=E.progressionRewards(c);
+    rew.classes.forEach(function(x){ if(Array.isArray(x.pending)&&x.pending.length>0){ out.push({type:'discipline',classId:x.classId,label:'Choose a discipline for '+x.className}); } });
+    rew.classes.forEach(function(x){ (x.abilities.available||[]).forEach(function(a){ out.push({type:'ability',classId:x.classId,id:a.id,label:'Learn '+a.name+' ('+x.className+' Lv '+a.level+')'}); }); });
+    rew.classes.forEach(function(x){ if(x.level<20){ out.push({type:'class-level',classId:x.classId,label:'Level up '+x.className+' to '+(x.level+1)}); } });
+    rew.classes.forEach(function(x){ var up=(x.passives.upcoming||[])[0]; if((up==null)===false){ out.push({type:'passive',classId:x.classId,label:'Unlock '+up.name+' ('+x.className+' Lv '+up.level+')'}); } });
+    var tp=E.tierProgress(c);
+    if(tp.atTop===false&&(tp.nextTier==null)===false){ out.push({type:'tier',label:'Reach '+tp.nextTier+' tier at Total Level '+tp.nextAt}); }
+    return out;
+  };
+})(SM.engine);
+
+(function(E){
+  E.validateBuild=function(c, stage){
+    stage=(stage==='saved')?'saved':'create';
+    var errors=[], warnings=[];
+    var ep=function(code,msg){ errors.push({code:code,msg:msg}); };
+    var wp=function(code,msg){ warnings.push({code:code,msg:msg}); };
+    if(c==null||(typeof c==='object')===false){ return {valid:false, errors:[{code:'character',msg:'No character to validate.'}], warnings:[], totalLevel:0, tier:E.tierOf(0)}; }
+    var nm=(typeof c.name==='string')?c.name.trim():'';
+    if(nm.length===0) ep('name','Enter a character name.');
+    var kin=(c.kinId==null)?null:E.kin(c.kinId);
+    if(c.kinId==null) ep('kin','Choose a Kin.');
+    else if(kin==null) ep('kin','Selected Kin is invalid.');
+    var lin=(c.lineageId==null)?null:E.lineage(c.lineageId);
+    if(c.lineageId==null) ep('lineage','Choose a Lineage.');
+    else if(lin==null) ep('lineage','Selected Lineage is invalid.');
+    else if((kin==null)===false&&((lin.kin===c.kinId)===false)) ep('lineage','Selected Lineage does not belong to the selected Kin.');
+    var classes=Array.isArray(c.classes)?c.classes:[];
+    if(Array.isArray(c.classes)===false) ep('classes','Character class data is malformed.');
+    var clv=SM.creator.validateClassLevels(classes);
+    clv.errors.forEach(function(e){ ep(e.code||'class', e.msg); });
+    var seenC={};
+    classes.forEach(function(x){ if(x&&(x.classId==null)===false){ if(seenC[x.classId]){ var d0=E.cls(x.classId); ep('class','Duplicate class entry: '+(d0?d0.name:x.classId)+'.'); } seenC[x.classId]=true; } });
+    classes.forEach(function(x){
+      if(x==null||(typeof x==='object')===false){ ep('class','Malformed class entry.'); return; }
+      var cl=(x.classId==null)?null:E.cls(x.classId);
+      if(x.discId==null){
+        if(stage==='create') ep('discipline','Choose a Discipline'+(cl?(' for '+cl.name):'')+'.');
+        else wp('discipline','Discipline choice pending'+(cl?(' for '+cl.name):'')+'.');
+      } else {
+        var ds=E.disc(x.discId);
+        if(ds==null) ep('discipline','Invalid discipline selected'+(cl?(' for '+cl.name):'')+'.');
+        else if((cl==null)===false&&((ds.cls===cl.id)===false)) ep('discipline','Discipline "'+ds.name+'" does not belong to '+cl.name+'.');
+      }
+    });
+    var owned=Array.isArray(c.abilities)?c.abilities:[];
+    var seenA={};
+    owned.forEach(function(idv){
+      if(seenA[idv]) ep('ability','Duplicate ability: '+idv+'.');
+      seenA[idv]=true;
+      var ab=E.ability(idv);
+      if(ab==null){ ep('ability','Invalid ability reference: '+idv+'.'); return; }
+      var cl=classes.find(function(y){ return y&&y.classId===ab.cls; });
+      if(cl==null){ ep('ability','Ability "'+ab.name+'" requires a class the character does not have.'); return; }
+      var lv=(typeof cl.level==='number')?cl.level:0;
+      if(ab.level>lv) ep('ability','Ability "'+ab.name+'" requires '+((E.cls(ab.cls)||{}).name||ab.cls)+' level '+ab.level+'.');
+      if((ab.disc==null)===false&&((cl.discId===ab.disc)===false)) ep('ability','Ability "'+ab.name+'" requires a different discipline.');
+    });
+    var normCount=SM.creator.normalizeClassLevels(classes).length;
+    if(normCount>1) wp('multiclass','Character has multiple classes.');
+    var total=SM.creator.calculateTotalLevel(classes);
+    var tier=SM.creator.calculateCharacterTier(total);
+    return { valid:(errors.length===0), errors:errors, warnings:warnings, totalLevel:total, tier:tier };
+  };
+  E.sanitizeBuild=function(raw){
+    var c=E.migrateChar(raw);
+    if(Array.isArray(c.classes)) c.classes=SM.creator.normalizeClassLevels(c.classes);
+    c.totalLevel=E.totalLevel(c); c.tier=E.tierOf(c.totalLevel);
+    return c;
+  };
+})(SM.engine);
+
+(function(E){
+  E.characterSummary=function(c){
+    if(c==null||(typeof c==='object')===false) return {malformed:true, id:null, name:'Unknown', reason:'Not a character record.'};
+    var idn=E.buildIdentity(c);
+    var kin=(c.kinId==null)?null:E.kin(c.kinId);
+    var lin=(c.lineageId==null)?null:E.lineage(c.lineageId);
+    var primary=E.primaryClass(c);
+    var classesLabel=idn.classes.map(function(x){return x.name+' '+x.level;}).join(' / ');
+    var discLabel=idn.classes.map(function(x){return x.discName;}).filter(function(x){return (x==null)===false;}).join(' / ');
+    var nm=(typeof c.name==='string'&&c.name.trim().length>0)?c.name.trim():'Unnamed Hero';
+    return { id:c.id||null, name:nm, kin:kin?kin.name:null, lineage:lin?lin.name:null,
+      primaryClass:primary?primary.name:null, classes:idn.classes, classesLabel:classesLabel, discLabel:discLabel,
+      totalLevel:idn.totalLevel, tier:idn.tier, hasClass:idn.hasClass, multiclass:idn.multiclass,
+      updated:(typeof c.updated==='number')?c.updated:null, malformed:false };
+  };
+  E.store.rosterEntries=function(){
+    var raw=E.store.rawChars(); var out=[]; var seenId={};
+    raw.forEach(function(rec, idx){
+      try{
+        if(rec==null||(typeof rec==='object')===false||Array.isArray(rec)){ out.push({kind:'malformed', index:idx, id:null, reason:'Record is not a character object.'}); return; }
+        if(rec.id==null||(typeof rec.id==='string')===false||rec.id.length===0){ out.push({kind:'malformed', index:idx, id:null, reason:'Character is missing an ID.'}); return; }
+        var dup=(seenId[rec.id]===true); seenId[rec.id]=true;
+        var m=E.migrateChar(rec); m.id=rec.id; m.totalLevel=E.totalLevel(m); m.tier=E.tierOf(m.totalLevel);
+        var sum=E.characterSummary(m); var vb=E.validateBuild(m,'saved');
+        out.push({kind:'valid', id:rec.id, char:m, summary:sum, valid:vb.valid, warnings:vb.warnings, errors:vb.errors, duplicateId:dup});
+      }catch(e){ out.push({kind:'malformed', index:idx, id:(rec&&rec.id)||null, reason:'Could not read character record.'}); }
+    });
+    return out;
+  };
+})(SM.engine);
+
 SM.lib.abilHtml=function(r){if(r.abilities==null||r.abilities.length===0)return '';var U=SM.ui;return '<div class="eyebrow" style="margin-top:12px">Discipline Abilities</div>'+r.abilities.map(function(a){return '<div class="small" style="margin-top:6px"><b>'+U.esc(a.name)+'</b> <span class="tag">Lv '+a.level+'</span> <span class="tag">'+U.esc(a.type)+'</span><br>'+U.esc(a.desc)+'</div>';}).join('');};
 SM.lib.altHtml=function(r){if(r.alterations==null||r.alterations.length===0)return '';var U=SM.ui;return '<div class="eyebrow" style="margin-top:12px">Physical Alterations</div>'+r.alterations.map(function(a){return '<div class="small" style="margin-top:6px"><span class="tag" style="color:var(--emerald)">Lv '+a.level+'</span> <b>'+U.esc(a.name)+'</b> — '+U.esc(a.desc)+'</div>';}).join('');};
 SM.lib.sigHtml=function(r){if(r.signature==null||r.signature.length===0)return '';var U=SM.ui;return '<div class="eyebrow" style="margin-top:12px">Signature Abilities</div>'+r.signature.map(function(s){return '<div class="small" style="margin-top:6px"><b>'+U.esc(s.name)+'</b>'+(s.level?' <span class="tag">Lv '+s.level+'</span>':'')+' — '+U.esc(s.desc)+'</div>';}).join('');};
