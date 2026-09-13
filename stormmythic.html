@@ -2438,6 +2438,757 @@ SM.io={
 };
 
 
+
+/* ===== PHASE 5A COMBAT CORE (engine only) ===== */
+
+/* =====================================================================
+   PHASE 5A: COMBAT CORE ENGINE  (SM.combat)
+   ---------------------------------------------------------------------
+   Engine/rules layer only. Deterministic when an RNG is injected.
+   - Reuses existing authoritative helpers (E.mod, E.defenses, E.attackBonus,
+     E.maxHP, E.resource, E.saveMod, E.speed, E.profBonus, E.tierOf ...).
+   - Introduces NO new stat formulas and NO competing character schema.
+   - Never writes to localStorage or mutates persistent character records.
+   - No UI. Phase 5B builds the Battle UI on top of this API.
+   ===================================================================== */
+(function(){
+  if (typeof SM === 'undefined') return;
+  var E = SM.engine, D = SM.data;
+  var C = {};
+  SM.combat = C;
+  C.version = '5A';
+
+  var ATTR_IDS = ['MIG','VIG','PRE','SPI','AGI','INS','INT'];
+  var PARTICIPANT_TYPES = ['PLAYER','ALLY','ENEMY','NPC','SUMMON'];
+  var SIDE_OF = { PLAYER:'party', ALLY:'party', SUMMON:'party', ENEMY:'foe', NPC:'neutral' };
+
+  /* -------------------- Central rules (edit here, never in UI) -------------------- */
+  C.RULES = {
+    d20Min: 1, d20Max: 20,
+    critOn: 20, critMissOn: 1, critMissEnabled: true,
+    critMultiplier: 2,               // critical doubles RAW damage before mitigation
+    saveNatCrit: true,               // nat20 auto-success, nat1 auto-fail on saves
+    minDamageOnHit: 1,               // a connecting attack deals at least this much
+    downedStateTypes: ['PLAYER','ALLY'], // these go DOWNED at 0 HP; others are DEFEATED
+    downedToDefeatedOnZeroAgain: true,
+    clearConditionsOnDefeat: true,
+    woundedThreshold: 0.5            // 0 < hp <= maxHp*threshold => 'wounded'
+  };
+
+  /* -------------------- Event type constants -------------------- */
+  C.EVENTS = {
+    COMBAT_STARTED:'COMBAT_STARTED', ROUND_STARTED:'ROUND_STARTED',
+    TURN_STARTED:'TURN_STARTED', TURN_ENDED:'TURN_ENDED',
+    ATTACK_DECLARED:'ATTACK_DECLARED', ATTACK_RESOLVED:'ATTACK_RESOLVED',
+    DAMAGE_DEALT:'DAMAGE_DEALT', HEALING_APPLIED:'HEALING_APPLIED',
+    CONDITION_APPLIED:'CONDITION_APPLIED', CONDITION_REMOVED:'CONDITION_REMOVED',
+    RESOURCE_SPENT:'RESOURCE_SPENT', RESOURCE_RESTORED:'RESOURCE_RESTORED',
+    PARTICIPANT_DOWNED:'PARTICIPANT_DOWNED', PARTICIPANT_DEFEATED:'PARTICIPANT_DEFEATED',
+    SAVE_RESOLVED:'SAVE_RESOLVED', ABILITY_EXECUTED:'ABILITY_EXECUTED', SPELL_CAST:'SPELL_CAST',
+    REACTION_TRIGGERED:'REACTION_TRIGGERED',
+    COMBAT_VICTORY:'COMBAT_VICTORY', COMBAT_DEFEAT:'COMBAT_DEFEAT'
+  };
+  C.PARTICIPANT_TYPES = PARTICIPANT_TYPES.slice();
+
+  /* -------------------- Small utilities -------------------- */
+  function err(code, message){ return { ok:false, error:code, message: message || code }; }
+  function num(v, d){
+    if (typeof v === 'number' && isFinite(v)) return v;
+    if (v !== null && v !== undefined && v !== '' && isFinite(Number(v))) return Number(v);
+    return d;
+  }
+  function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+  function isObj(x){ return x !== null && typeof x === 'object'; }
+
+  /* -------------------- Injectable RNG -------------------- */
+  // mulberry32 seeded PRNG -> deterministic function returning a float in [0,1)
+  C.makeRng = function(seed){
+    var a = (seed >>> 0) || 0x9e3779b9;
+    return function(){
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  };
+  function rngOf(state){ return (state && typeof state.rng === 'function') ? state.rng : Math.random; }
+  function rollDie(state, sides){ sides = sides || 20; return Math.floor(rngOf(state)() * sides) + 1; }
+  C.rollDie = rollDie;
+
+  /* -------------------- Thin calc wrappers (reuse existing helpers; NO new formulas) -------------------- */
+  C.calc = {
+    getAttributeModifier: function(v){ return E.mod(v); },
+    calculatePhysicalDefense: function(c){ return E.defenses(c).physicalDefense; },
+    calculateMagicDefense: function(c){ return E.defenses(c).magicDefense; },
+    calculateEvasion: function(c){ return E.defenses(c).evasion; },
+    calculateBlock: function(c){ return E.defenses(c).block; },
+    calculateScalingBonus: function(c){ var m=E.mods(c), w=E.equippedItem(c,'weapon'); return m[(w&&w.scale)||'MIG']||0; },
+    calculateAttackPower: function(c){ return E.attackBonus(c); }
+  };
+
+  /* -------------------- Character -> combat snapshot (pure; never mutates the record) -------------------- */
+  C.snapshotCharacter = function(char){
+    if (!isObj(char)) return null;
+    var mods = E.mods(char);
+    var def = E.defenses(char);
+    var res = E.resource(char);
+    var total = E.totalLevel(char);
+    var prof = E.profBonus(total);
+    var p = E.primaryClass(char);
+    var castKey = (p && p.primary && p.primary[1]) || 'SPI';
+    var saveMods = {};
+    ATTR_IDS.forEach(function(k){ saveMods[k] = E.saveMod(char, k); });
+    return {
+      maxHp: E.maxHP(char),
+      speed: E.speed(char),
+      attackBonus: E.attackBonus(char),
+      magicAttackBonus: prof + (mods[castKey] || 0),
+      defenses: {
+        physicalDefense: def.physicalDefense, magicDefense: def.magicDefense,
+        evasion: def.evasion, block: def.block,
+        defenseValue: def.defenseValue, magicTarget: def.magicTarget
+      },
+      saveMods: saveMods,
+      resource: { name: res.name, max: res.max, current: res.max },
+      initiativeMod: mods.AGI || 0,
+      tier: E.tierOf(total), totalLevel: total
+    };
+  };
+
+  /* -------------------- Combat state -------------------- */
+  var _combatCounter = 0;
+  C.createCombat = function(opts){
+    opts = opts || {};
+    var rng;
+    if (typeof opts.rng === 'function') rng = opts.rng;
+    else if (opts.seed !== null && opts.seed !== undefined) rng = C.makeRng(opts.seed);
+    else rng = Math.random;
+    return {
+      combatId: opts.combatId || ('cmb-' + Date.now().toString(36) + '-' + (++_combatCounter)),
+      round: 0, turnIndex: -1, phase: 'setup',    // 'setup' | 'active' | 'ended'
+      participants: [], order: [], activeId: null,
+      defeated: [], log: [], pendingReactions: [], pendingEffects: [],
+      encounter: opts.encounter || {}, outcome: null,
+      rng: rng, _seq: 0, _pcount: 0, listeners: {}
+    };
+  };
+
+  /* -------------------- Events / log / listeners -------------------- */
+  C.emitCombatEvent = function(state, type, data){
+    data = data || {};
+    var ev = {
+      seq: ++state._seq, type: type, round: state.round, turnIndex: state.turnIndex,
+      actorId: data.actorId || null, targetId: data.targetId || null, data: data
+    };
+    state.log.push(ev);
+    var ls = state.listeners[type] || [];
+    for (var i = 0; i < ls.length; i++){ try { ls[i](ev, state); } catch(e){} }
+    var any = state.listeners['*'] || [];
+    for (var j = 0; j < any.length; j++){ try { any[j](ev, state); } catch(e){} }
+    if (type !== C.EVENTS.REACTION_TRIGGERED) scanTriggers(state, ev);
+    return ev;
+  };
+  C.on = function(state, type, fn){
+    if (typeof fn !== 'function') return function(){};
+    (state.listeners[type] = state.listeners[type] || []).push(fn);
+    return function off(){ var arr = state.listeners[type]; var i = arr.indexOf(fn); if (i >= 0) arr.splice(i, 1); };
+  };
+  C.getCombatLog = function(state){ return state ? state.log.slice() : []; };
+
+  /* -------------------- Reaction / passive trigger scan (event-driven, extensible) -------------------- */
+  // Participants may carry reactions/passives as { when:<eventType>, id, kind }.
+  // Matching triggers are queued into state.pendingReactions for the UI/AI layer to resolve.
+  function scanTriggers(state, ev){
+    for (var i = 0; i < state.participants.length; i++){
+      var p = state.participants[i];
+      if (p.state === 'defeated') continue;
+      var specs = (p.reactions || []).concat(p.passives || []);
+      for (var s = 0; s < specs.length; s++){
+        var spec = specs[s];
+        if (spec.when && spec.when !== ev.type) continue;
+        var ok = true;
+        if (typeof spec.match === 'function'){ try { ok = !!spec.match(ev, p, state); } catch(e){ ok = false; } }
+        if (ok){
+          state.pendingReactions.push({ participantId: p.id, trigger: spec.id || spec.when, event: ev.seq, kind: spec.kind || 'reaction' });
+          C.emitCombatEvent(state, C.EVENTS.REACTION_TRIGGERED, { actorId: p.id, trigger: spec.id || spec.when, sourceEvent: ev.seq });
+        }
+      }
+    }
+  }
+  // NOTE: REACTION_TRIGGERED is emitted OUTSIDE emitCombatEvent's scan loop to avoid recursion.
+  // scanTriggers is only invoked from emitCombatEvent; it must not itself re-scan. Guard below.
+
+  /* -------------------- Turn-state helper -------------------- */
+  function baseTurn(speed){
+    return { action:true, bonus:true, reaction:true, movement: (speed || 0), maxMovement: (speed || 0), used:{} };
+  }
+
+  /* -------------------- Participants -------------------- */
+  C.getParticipant = function(state, id){
+    if (!state || !id) return null;
+    for (var i = 0; i < state.participants.length; i++){ if (state.participants[i].id === id) return state.participants[i]; }
+    return null;
+  };
+
+  C.addParticipant = function(state, spec){
+    if (!state) return err('invalid_state', 'No combat state.');
+    if (state.phase === 'ended') return err('invalid_state', 'Combat already ended.');
+    spec = spec || {};
+    var type = PARTICIPANT_TYPES.indexOf(spec.type) >= 0 ? spec.type : 'ENEMY';
+    var snap = null, refId = null, name = spec.name;
+
+    if (isObj(spec.character)){
+      snap = C.snapshotCharacter(spec.character);
+      refId = spec.character.id || null;
+      if (!name) name = spec.character.name || 'Hero';
+    } else if (spec.characterId && E.store && typeof E.store.getChar === 'function'){
+      var ch = E.store.getChar(spec.characterId);
+      if (ch){ snap = C.snapshotCharacter(ch); refId = ch.id; if (!name) name = ch.name; }
+    }
+
+    if (!snap){
+      // Generic entity spec (enemy / npc / summon): explicit numbers, no character record.
+      var def = spec.defenses || {};
+      snap = {
+        maxHp: num(spec.maxHp, num(spec.hp, 1)),
+        speed: num(spec.speed, 30),
+        attackBonus: num(spec.attackBonus, 0),
+        magicAttackBonus: num(spec.magicAttackBonus, num(spec.attackBonus, 0)),
+        defenses: {
+          physicalDefense: num(def.physicalDefense, 0), magicDefense: num(def.magicDefense, 0),
+          evasion: num(def.evasion, 0), block: num(def.block, 0),
+          defenseValue: num(def.defenseValue, 10 + num(def.physicalDefense, 0)),
+          magicTarget: num(def.magicTarget, 10 + num(def.magicDefense, 0))
+        },
+        saveMods: spec.saveMods || {},
+        resource: spec.resource
+          ? { name: spec.resource.name || 'Resource', max: num(spec.resource.max, 0), current: num(spec.resource.current, num(spec.resource.max, 0)) }
+          : { name: '-', max: 0, current: 0 },
+        initiativeMod: num(spec.initiativeMod, 0),
+        tier: spec.tier || 'Heroic', totalLevel: num(spec.totalLevel, 1)
+      };
+    }
+
+    var maxHp = Math.max(1, num(snap.maxHp, 1));
+    var startHp = (spec.hp !== null && spec.hp !== undefined) ? clamp(num(spec.hp, maxHp), 0, maxHp) : maxHp;
+
+    var p = {
+      id: spec.id || ('p' + (++state._pcount)),
+      name: name || (type.charAt(0) + type.slice(1).toLowerCase()),
+      type: type,
+      side: spec.side || SIDE_OF[type] || 'neutral',
+      ref: refId,
+      maxHp: maxHp, hp: startHp, tempHp: num(spec.tempHp, 0),
+      resources: { name: snap.resource.name, max: snap.resource.max, current: num(snap.resource.current, snap.resource.max) },
+      defenses: snap.defenses,
+      attackBonus: snap.attackBonus, magicAttackBonus: snap.magicAttackBonus,
+      saveMods: snap.saveMods || {}, speed: snap.speed,
+      mitigation: spec.mitigation || {}, flatMitigation: num(spec.flatMitigation, 0),
+      initiative: (spec.initiative !== null && spec.initiative !== undefined && isFinite(Number(spec.initiative))) ? Number(spec.initiative) : null,
+      initiativeMod: num(spec.initiativeMod, snap.initiativeMod),
+      conditions: [], turn: baseTurn(snap.speed),
+      reactions: spec.reactions || [], passives: spec.passives || [],
+      cooldowns: {}, flags: spec.flags || {},
+      _seq: state._pcount, state: 'healthy',
+      tier: snap.tier, totalLevel: snap.totalLevel
+    };
+    reclassifyIfAlive(p);
+    state.participants.push(p);
+    return { ok:true, participant:p, id:p.id };
+  };
+
+  C.removeParticipant = function(state, id){
+    var i = -1;
+    for (var k = 0; k < state.participants.length; k++){ if (state.participants[k].id === id){ i = k; break; } }
+    if (i < 0) return err('not_found', 'Participant not found.');
+    var p = state.participants.splice(i, 1)[0];
+    var oi = state.order.indexOf(id); if (oi >= 0) state.order.splice(oi, 1);
+    var di = state.defeated.indexOf(id); if (di >= 0) state.defeated.splice(di, 1);
+    if (state.activeId === id) state.activeId = null;
+    return { ok:true, participant:p };
+  };
+
+  function reclassifyIfAlive(p){
+    if (p.hp > 0){ p.state = (p.hp <= p.maxHp * C.RULES.woundedThreshold) ? 'wounded' : 'healthy'; }
+  }
+
+  /* -------------------- Initiative -------------------- */
+  C.rollInitiative = function(state){
+    state.participants.forEach(function(p){
+      if (p.initiative === null || p.initiative === undefined){
+        p.initiative = rollDie(state, 20) + (p.initiativeMod || 0);
+      }
+    });
+    state.order = state.participants.slice().sort(cmpInit).map(function(p){ return p.id; });
+    return state.order.slice();
+  };
+  function cmpInit(a, b){
+    if (b.initiative !== a.initiative) return b.initiative - a.initiative;             // higher total first
+    if ((b.initiativeMod || 0) !== (a.initiativeMod || 0)) return (b.initiativeMod || 0) - (a.initiativeMod || 0); // higher mod wins ties
+    return a._seq - b._seq;                                                            // stable by insertion order
+  }
+
+  /* -------------------- Turn order -------------------- */
+  C.startCombat = function(state){
+    if (!state) return err('invalid_state');
+    if (state.phase === 'active') return err('already_active', 'Combat already started.');
+    if (state.participants.length === 0) return err('no_participants', 'Add participants before starting.');
+    if (state.order.length === 0) C.rollInitiative(state);
+    state.phase = 'active'; state.round = 0; state.outcome = null;
+    C.emitCombatEvent(state, C.EVENTS.COMBAT_STARTED, { order: state.order.slice() });
+    return C.startRound(state);
+  };
+
+  C.startRound = function(state){
+    if (state.phase !== 'active') return err('not_active', 'Combat is not active.');
+    state.round += 1; state.turnIndex = -1;
+    state.participants.forEach(function(p){ if (p.state !== 'defeated'){ p.turn = baseTurn(p.speed); } });
+    C.emitCombatEvent(state, C.EVENTS.ROUND_STARTED, { round: state.round });
+    return C.startTurn(state);
+  };
+
+  C.startTurn = function(state){
+    var n = state.order.length;
+    for (var step = 0; step < n; step++){
+      state.turnIndex += 1;
+      if (state.turnIndex >= n) break;
+      var p = C.getParticipant(state, state.order[state.turnIndex]);
+      if (p && p.state !== 'defeated' && p.state !== 'downed'){
+        state.activeId = p.id;
+        p.turn = baseTurn(p.speed);                 // action economy resets at the start of the participant's turn
+        C.emitCombatEvent(state, C.EVENTS.TURN_STARTED, { actorId: p.id });
+        processConditionsFor(state, p, 'turnStart');
+        return { ok:true, activeId:p.id, participant:p };
+      }
+    }
+    // Round exhausted (or nobody actable this pass)
+    var chk = C.checkCombatEnd(state);
+    if (chk.ended) return chk;
+    var anyActable = state.participants.some(function(p){ return p.state !== 'defeated' && p.state !== 'downed'; });
+    if (!anyActable){ state.activeId = null; return { ok:true, stalled:true, activeId:null }; }
+    return C.startRound(state);
+  };
+
+  C.endTurn = function(state){
+    var p = C.getActiveParticipant(state);
+    if (!p) return err('no_active', 'No active participant.');
+    processConditionsFor(state, p, 'turnEnd');
+    C.emitCombatEvent(state, C.EVENTS.TURN_ENDED, { actorId: p.id });
+    var end = C.checkCombatEnd(state);
+    if (end.ended) return end;
+    return C.startTurn(state);
+  };
+
+  C.getActiveParticipant = function(state){ return state.activeId ? C.getParticipant(state, state.activeId) : null; };
+
+  C.checkCombatEnd = function(state){
+    var foes = state.participants.filter(function(p){ return p.side === 'foe'; });
+    var party = state.participants.filter(function(p){ return p.side === 'party'; });
+    var foesLeft = foes.filter(function(p){ return p.state !== 'defeated'; }).length;
+    var partyActable = party.filter(function(p){ return p.state !== 'defeated' && p.state !== 'downed'; }).length;
+
+    if (foes.length > 0 && foesLeft === 0){
+      if (state.outcome !== 'victory'){ state.outcome = 'victory'; state.phase = 'ended'; C.emitCombatEvent(state, C.EVENTS.COMBAT_VICTORY, {}); }
+      return { ok:true, ended:true, outcome:'victory' };
+    }
+    if (party.length > 0 && foes.length > 0 && partyActable === 0){
+      if (state.outcome !== 'defeat'){ state.outcome = 'defeat'; state.phase = 'ended'; C.emitCombatEvent(state, C.EVENTS.COMBAT_DEFEAT, {}); }
+      return { ok:true, ended:true, outcome:'defeat' };
+    }
+    return { ok:true, ended:false, outcome:null };
+  };
+
+  /* -------------------- Action economy -------------------- */
+  function spendEcon(state, id, key){
+    var p = C.getParticipant(state, id || state.activeId);
+    if (!p) return err('invalid_participant', 'Participant not found.');
+    if (p.state === 'defeated' || p.state === 'downed') return err('cannot_act', 'Participant cannot act.');
+    if (key !== 'reaction' && p.id !== state.activeId) return err('not_active_turn', 'Not this participant\'s turn.');
+    if (p.turn[key] !== true) return err('unavailable', 'No ' + key + ' available.');
+    p.turn[key] = false;
+    return { ok:true, participant:p, spent:key };
+  }
+  C.spendAction = function(state, id){ return spendEcon(state, id, 'action'); };
+  C.spendBonusAction = function(state, id){ return spendEcon(state, id, 'bonus'); };
+  C.useReaction = function(state, id){ return spendEcon(state, id, 'reaction'); };
+  C.move = function(state, id, dist){
+    var p = C.getParticipant(state, id || state.activeId);
+    if (!p) return err('invalid_participant');
+    if (p.state === 'defeated' || p.state === 'downed') return err('cannot_act');
+    if (p.id !== state.activeId) return err('not_active_turn');
+    dist = num(dist, 0);
+    if (dist < 0) return err('invalid_distance');
+    if (dist > p.turn.movement) return err('insufficient_movement', 'Not enough movement.');
+    p.turn.movement -= dist;
+    return { ok:true, remaining:p.turn.movement };
+  };
+
+  /* -------------------- Defense pipeline -------------------- */
+  C.getDefenseTarget = function(p, type){
+    var magic = (type === 'magical' || type === 'spell' || type === 'magic');
+    return magic ? p.defenses.magicTarget : p.defenses.defenseValue;
+  };
+
+  /* -------------------- Attack resolution -------------------- */
+  var ATTACK_TYPES = ['melee','ranged','physical','magical','spell','ability'];
+  C.resolveAttack = function(state, opts){
+    opts = opts || {};
+    var atk = C.getParticipant(state, opts.attackerId);
+    var tgt = C.getParticipant(state, opts.targetId);
+    if (!atk) return err('invalid_attacker', 'Attacker not found.');
+    if (!tgt) return err('invalid_target', 'Target not found.');
+    if (atk.state === 'defeated' || atk.state === 'downed') return err('attacker_cannot_act', 'Attacker cannot act.');
+    if (tgt.state === 'defeated') return err('target_defeated', 'Target already defeated.');
+    if (ATTACK_TYPES.indexOf(opts.type) < 0 && opts.type !== undefined && opts.type !== null) return err('invalid_attack_type', 'Unknown attack type: ' + opts.type);
+    var type = ATTACK_TYPES.indexOf(opts.type) >= 0 ? opts.type : 'physical';
+    var magic = (type === 'magical' || type === 'spell');
+    var bonus = (typeof opts.bonus === 'number') ? opts.bonus : (magic ? atk.magicAttackBonus : atk.attackBonus);
+    var defKey = opts.defenseKey || (magic ? 'magicTarget' : 'defenseValue');
+    var target = (typeof opts.defense === 'number') ? opts.defense : tgt.defenses[defKey];
+
+    var roll = rollDie(state, 20);
+    var total = roll + bonus;
+    var critMiss = C.RULES.critMissEnabled && roll === C.RULES.critMissOn;
+    var crit = roll === C.RULES.critOn;
+    var hit = crit ? true : (critMiss ? false : total >= target);
+
+    C.emitCombatEvent(state, C.EVENTS.ATTACK_DECLARED, { actorId: atk.id, targetId: tgt.id, type: type });
+
+    var result = {
+      ok:true, hit:hit, critical: hit && crit, criticalMiss: critMiss,
+      attackRoll: roll, attackTotal: total, bonus: bonus,
+      defense: target, defenseKey: defKey, type: type,
+      damageType: opts.damageType || (magic ? 'magical' : 'physical'),
+      attackerId: atk.id, targetId: tgt.id, damage: 0, damageResult: null
+    };
+
+    if (hit && opts.damage !== null && opts.damage !== undefined){
+      var dmg = C.resolveDamage(state, {
+        targetId: tgt.id, amount: num(opts.damage, 0), type: result.damageType,
+        critical: result.critical, sourceId: atk.id,
+        minDamage: (opts.minDamage !== null && opts.minDamage !== undefined) ? opts.minDamage : C.RULES.minDamageOnHit,
+        mitigate: opts.mitigate !== false
+      });
+      result.damage = dmg.finalDamage; result.damageResult = dmg;
+    }
+    C.emitCombatEvent(state, C.EVENTS.ATTACK_RESOLVED, { actorId: atk.id, targetId: tgt.id, hit: hit, critical: result.critical, damage: result.damage });
+    return result;
+  };
+
+  /* -------------------- Damage engine (centralized) -------------------- */
+  C.resolveDamage = function(state, opts){
+    opts = opts || {};
+    var tgt = C.getParticipant(state, opts.targetId);
+    if (!tgt) return err('invalid_target', 'Target not found.');
+    var raw = num(opts.amount, 0); if (raw < 0) raw = 0;
+    var type = opts.type || 'physical';
+    var critical = opts.critical === true;
+    if (critical) raw = Math.round(raw * C.RULES.critMultiplier);
+
+    // Centralized flat mitigation, kept separate from the to-hit defense so it is never double-counted.
+    var mitigation = 0;
+    if (opts.mitigate !== false){
+      var mit = tgt.mitigation || {};
+      mitigation = num(mit[type], 0) + num(tgt.flatMitigation, 0);
+    }
+    if (typeof opts.mitigation === 'number') mitigation = opts.mitigation;
+
+    var minD = num(opts.minDamage, 0);
+    var mitigated = raw - mitigation;
+    if (mitigated < minD) mitigated = minD;
+    if (mitigated < 0) mitigated = 0;
+    var finalDamage = mitigated;
+
+    var before = tgt.hp;
+    var remaining = finalDamage, tempAbsorbed = 0;
+    if (tgt.tempHp > 0){ tempAbsorbed = Math.min(tgt.tempHp, remaining); tgt.tempHp -= tempAbsorbed; remaining -= tempAbsorbed; }
+    applyHpLoss(state, tgt, remaining, opts.sourceId);
+    var after = tgt.hp;
+
+    var res = {
+      ok:true, rawDamage: raw, mitigation: mitigation, mitigatedDamage: finalDamage, finalDamage: finalDamage,
+      damageType: type, critical: critical, tempAbsorbed: tempAbsorbed,
+      targetHpBefore: before, targetHpAfter: after,
+      downed: tgt.state === 'downed', defeated: tgt.state === 'defeated', targetId: tgt.id
+    };
+    C.emitCombatEvent(state, C.EVENTS.DAMAGE_DEALT, { actorId: opts.sourceId || null, targetId: tgt.id, amount: finalDamage, damageType: type, critical: critical });
+    return res;
+  };
+
+  /* -------------------- Downed / defeated model -------------------- */
+  function applyHpLoss(state, p, amount, sourceId){
+    if (amount <= 0){ reclassifyIfAlive(p); return; }
+    var wasDown = (p.state === 'downed');
+    p.hp = Math.max(0, p.hp - amount);
+    if (p.hp > 0){ reclassifyIfAlive(p); return; }
+    if (wasDown){
+      if (C.RULES.downedToDefeatedOnZeroAgain) setDefeated(state, p, sourceId);
+      return;
+    }
+    if (C.RULES.downedStateTypes.indexOf(p.type) >= 0){
+      p.state = 'downed';
+      C.emitCombatEvent(state, C.EVENTS.PARTICIPANT_DOWNED, { actorId: sourceId || null, targetId: p.id });
+    } else {
+      setDefeated(state, p, sourceId);
+    }
+  }
+  function setDefeated(state, p, sourceId){
+    p.state = 'defeated';
+    if (state.defeated.indexOf(p.id) < 0) state.defeated.push(p.id);
+    if (C.RULES.clearConditionsOnDefeat) p.conditions = [];
+    C.emitCombatEvent(state, C.EVENTS.PARTICIPANT_DEFEATED, { actorId: sourceId || null, targetId: p.id });
+    C.checkCombatEnd(state);
+  }
+  // Death-save hook (documented default; centralized so Phases 5B-5E can override).
+  C.rollDeathSave = function(state, id, opts){
+    opts = opts || {};
+    var p = C.getParticipant(state, id);
+    if (!p) return err('invalid_participant');
+    if (p.state !== 'downed') return err('not_down', 'Participant is not downed.');
+    var dc = num(opts.dc, 10);
+    var roll = rollDie(state, 20);
+    var success = roll >= dc;
+    return { ok:true, roll: roll, dc: dc, success: success, note: 'Default death-save hook; final rules set in a later phase.' };
+  };
+  C.revive = function(state, id, hp){
+    var p = C.getParticipant(state, id);
+    if (!p) return err('invalid_participant');
+    if (p.state !== 'downed' && p.state !== 'defeated') return err('not_down', 'Participant is not downed or defeated.');
+    var di = state.defeated.indexOf(p.id); if (di >= 0) state.defeated.splice(di, 1);
+    p.hp = clamp(num(hp, 1), 1, p.maxHp);
+    reclassifyIfAlive(p);
+    return { ok:true, participant:p, hp:p.hp };
+  };
+
+  /* -------------------- Healing -------------------- */
+  C.resolveHealing = function(state, opts){
+    opts = opts || {};
+    var tgt = C.getParticipant(state, opts.targetId);
+    if (!tgt) return err('invalid_target', 'Target not found.');
+    var amount = num(opts.amount, 0); if (amount < 0) amount = 0;
+
+    if (opts.temp === true){
+      var tb = tgt.tempHp;
+      tgt.tempHp = Math.max(tgt.tempHp, amount); // temporary HP does not stack; keep the higher pool
+      C.emitCombatEvent(state, C.EVENTS.HEALING_APPLIED, { targetId: tgt.id, temp:true, amount: tgt.tempHp - tb });
+      return { ok:true, temp:true, requested:amount, healed:0, overheal:0, tempBefore:tb, tempAfter:tgt.tempHp, targetHpBefore:tgt.hp, targetHpAfter:tgt.hp, revived:false };
+    }
+
+    var canRevive = opts.allowRevive === true;
+    if (tgt.state === 'defeated' && !canRevive){
+      return { ok:true, healed:0, blocked:true, reason:'defeated', requested:amount, overheal:0, targetHpBefore:tgt.hp, targetHpAfter:tgt.hp, revived:false, temp:false };
+    }
+    var before = tgt.hp, revived = false;
+    if ((tgt.state === 'downed' || tgt.state === 'defeated') && canRevive){
+      var di = state.defeated.indexOf(tgt.id); if (di >= 0) state.defeated.splice(di, 1);
+      revived = true;
+    }
+    var healed = Math.max(0, Math.min(amount, tgt.maxHp - tgt.hp));
+    tgt.hp += healed;
+    var overheal = amount - healed;
+    reclassifyIfAlive(tgt);
+    C.emitCombatEvent(state, C.EVENTS.HEALING_APPLIED, { targetId: tgt.id, amount: healed, revived: revived });
+    return { ok:true, requested:amount, healed:healed, overheal:overheal, targetHpBefore:before, targetHpAfter:tgt.hp, revived:revived, temp:false };
+  };
+
+  /* -------------------- Saving throws -------------------- */
+  C.resolveSave = function(state, opts){
+    opts = opts || {};
+    var p = C.getParticipant(state, opts.participantId);
+    if (!p) return err('invalid_participant', 'Participant not found.');
+    var attr = opts.attr;
+    var mod = (typeof opts.bonus === 'number') ? opts.bonus : num((p.saveMods || {})[attr], 0);
+    var dc = num(opts.dc, 10);
+    var roll = rollDie(state, 20);
+    var total = roll + mod;
+    var success = total >= dc, critical = false;
+    if (C.RULES.saveNatCrit){
+      if (roll === C.RULES.critOn){ success = true; critical = true; }
+      else if (roll === C.RULES.critMissOn){ success = false; critical = true; }
+    }
+    C.emitCombatEvent(state, C.EVENTS.SAVE_RESOLVED, { targetId: p.id, attr: attr, dc: dc, roll: roll, total: total, success: success });
+    return { ok:true, success:success, roll:roll, total:total, dc:dc, attr:attr, mod:mod, critical:critical, participantId:p.id };
+  };
+
+  /* -------------------- Conditions / status effects -------------------- */
+  // Extensible tick-effect registry (id -> { onTurnStart, onTurnEnd }). Not hardcoded into UI.
+  C.CONDITION_EFFECTS = {
+    burning:      { onTurnStart: function(s,p,c){ C.resolveDamage(s,{ targetId:p.id, amount: num(c.value,2), type:'fire',   minDamage:0, mitigate:false, sourceId:c.source||null }); } },
+    poisoned:     { onTurnStart: function(s,p,c){ C.resolveDamage(s,{ targetId:p.id, amount: num(c.value,2), type:'poison', minDamage:0, mitigate:false, sourceId:c.source||null }); } },
+    bleeding:     { onTurnStart: function(s,p,c){ C.resolveDamage(s,{ targetId:p.id, amount: num(c.value,1), type:'physical',minDamage:0, mitigate:false, sourceId:c.source||null }); } },
+    regeneration: { onTurnStart: function(s,p,c){ C.resolveHealing(s,{ targetId:p.id, amount: num(c.value,2) }); } }
+  };
+
+  C.applyCondition = function(state, opts){
+    opts = opts || {};
+    var tgt = C.getParticipant(state, opts.targetId);
+    if (!tgt) return err('invalid_target', 'Target not found.');
+    var id = opts.id;
+    if (!id || typeof id !== 'string') return err('invalid_condition', 'Condition id required.');
+    if (tgt.state === 'defeated') return err('target_defeated', 'Cannot apply conditions to a defeated participant.');
+    var meta = (E.condition ? E.condition(id) : null);
+    var name = opts.name || (meta && meta.name) || id;
+    var stackable = opts.stackable === true;
+    var existing = null;
+    for (var i = 0; i < tgt.conditions.length; i++){ if (tgt.conditions[i].id === id){ existing = tgt.conditions[i]; break; } }
+
+    if (existing){
+      if (stackable){
+        existing.stacks = (existing.stacks || 1) + num(opts.stacks, 1);
+        if (opts.maxStacks) existing.stacks = Math.min(existing.stacks, num(opts.maxStacks, existing.stacks));
+      }
+      if (opts.duration !== null && opts.duration !== undefined){
+        var incoming = num(opts.duration, 0);
+        var cur = existing.permanent ? Infinity : num(existing.duration, 0);
+        existing.duration = (opts.refresh === true) ? incoming : Math.max(cur, incoming);
+        if (existing.duration !== Infinity) existing.permanent = false;
+      }
+      if (opts.value !== null && opts.value !== undefined) existing.value = opts.value;
+      C.emitCombatEvent(state, C.EVENTS.CONDITION_APPLIED, { targetId: tgt.id, conditionId: id, refreshed:true, stacks: existing.stacks });
+      return { ok:true, condition: existing, refreshed:true };
+    }
+
+    var permanent = (opts.duration === null || opts.duration === undefined);
+    var cond = {
+      id: id, name: name,
+      duration: permanent ? Infinity : num(opts.duration, 1), permanent: permanent,
+      stacks: stackable ? num(opts.stacks, 1) : 1,
+      value: (opts.value !== null && opts.value !== undefined) ? opts.value : null,
+      source: opts.source || null,
+      tags: opts.tags || (meta && meta.tags) || [],
+      startRound: state.round, data: opts.data || {}
+    };
+    tgt.conditions.push(cond);
+    C.emitCombatEvent(state, C.EVENTS.CONDITION_APPLIED, { targetId: tgt.id, conditionId: id, stacks: cond.stacks });
+    return { ok:true, condition: cond, refreshed:false };
+  };
+
+  C.removeCondition = function(state, opts){
+    opts = opts || {};
+    var tgt = C.getParticipant(state, opts.targetId);
+    if (!tgt) return err('invalid_target', 'Target not found.');
+    var i = -1;
+    for (var k = 0; k < tgt.conditions.length; k++){ if (tgt.conditions[k].id === opts.id){ i = k; break; } }
+    if (i < 0) return { ok:true, removed:false };
+    var c = tgt.conditions.splice(i, 1)[0];
+    C.emitCombatEvent(state, C.EVENTS.CONDITION_REMOVED, { targetId: tgt.id, conditionId: c.id, expired: opts.expired === true });
+    return { ok:true, removed:true, condition:c };
+  };
+
+  C.hasCondition = function(state, id, condId){
+    var p = C.getParticipant(state, id);
+    return p ? p.conditions.some(function(c){ return c.id === condId; }) : false;
+  };
+
+  C.processConditions = function(state, phase, id){
+    var targets = id ? [C.getParticipant(state, id)] : state.participants.slice();
+    targets.forEach(function(p){ if (p) processConditionsFor(state, p, phase); });
+    return { ok:true };
+  };
+
+  function processConditionsFor(state, p, phase){
+    if (!p || p.state === 'defeated') return;
+    var list = p.conditions.slice();
+    list.forEach(function(c){
+      var eff = C.CONDITION_EFFECTS[c.id];
+      if (!eff) return;
+      if (phase === 'turnStart' && typeof eff.onTurnStart === 'function') eff.onTurnStart(state, p, c);
+      if (phase === 'turnEnd' && typeof eff.onTurnEnd === 'function') eff.onTurnEnd(state, p, c);
+    });
+    if (phase === 'turnEnd'){
+      p.conditions.slice().forEach(function(c){
+        if (c.permanent || c.duration === Infinity) return;
+        c.duration -= 1;
+        if (c.duration <= 0) C.removeCondition(state, { targetId: p.id, id: c.id, expired:true });
+      });
+    }
+  }
+
+  /* -------------------- Resources -------------------- */
+  C.checkResource = function(state, id, amount){
+    var p = C.getParticipant(state, id);
+    if (!p) return false;
+    return (p.resources.current || 0) >= num(amount, 0);
+  };
+  C.spendResource = function(state, id, amount){
+    var p = C.getParticipant(state, id);
+    if (!p) return err('invalid_participant', 'Participant not found.');
+    var cost = num(amount, 0);
+    if ((p.resources.current || 0) < cost) return err('insufficient_resource', 'Not enough ' + (p.resources.name || 'resource') + '.');
+    p.resources.current -= cost;
+    C.emitCombatEvent(state, C.EVENTS.RESOURCE_SPENT, { targetId: p.id, amount: cost, resource: p.resources.name });
+    return { ok:true, current: p.resources.current };
+  };
+  C.restoreResource = function(state, id, amount){
+    var p = C.getParticipant(state, id);
+    if (!p) return err('invalid_participant', 'Participant not found.');
+    var amt = num(amount, 0);
+    p.resources.current = Math.min(p.resources.max, (p.resources.current || 0) + amt);
+    C.emitCombatEvent(state, C.EVENTS.RESOURCE_RESTORED, { targetId: p.id, amount: amt, resource: p.resources.name });
+    return { ok:true, current: p.resources.current };
+  };
+
+  /* -------------------- Ability / spell execution hooks (Phase 5C fills content) -------------------- */
+  C.ABILITY_HANDLERS = {};   // abilityId -> function(state, ctx) -> result
+  C.SPELL_HANDLERS = {};      // spellId   -> function(state, ctx) -> result
+
+  function executeVia(state, opts, kind){
+    opts = opts || {};
+    var actor = C.getParticipant(state, opts.actorId);
+    if (!actor) return err('invalid_participant', 'Actor not found.');
+    if (actor.state === 'defeated' || actor.state === 'downed') return err('cannot_act', 'Actor cannot act.');
+    var contentId = (kind === 'spell') ? opts.spellId : opts.abilityId;
+    var meta = (kind === 'spell') ? (E.spell ? E.spell(contentId) : null) : (E.ability ? E.ability(contentId) : null);
+
+    // Validate resource availability BEFORE consuming the action (no partial commits).
+    if (opts.cost !== null && opts.cost !== undefined && !C.checkResource(state, actor.id, opts.cost)){
+      return err('insufficient_resource', 'Not enough ' + (actor.resources.name || 'resource') + '.');
+    }
+    var actKey = opts.action || 'action';
+    if (actKey !== 'free'){
+      var sp = spendEcon(state, actor.id, actKey === 'bonus' ? 'bonus' : 'action');
+      if (!sp.ok) return sp;
+    }
+    if (opts.cost !== null && opts.cost !== undefined){
+      var rc = C.spendResource(state, actor.id, opts.cost);
+      if (!rc.ok) return rc;
+    }
+
+    var ctx = { state: state, actor: actor, actorId: actor.id, targetIds: opts.targetIds || [], meta: meta, contentId: contentId, opts: opts };
+    var handlers = (kind === 'spell') ? C.SPELL_HANDLERS : C.ABILITY_HANDLERS;
+    var out = { ok:true, executed:true, effects:[], contentId: contentId };
+    var handler = handlers[contentId];
+    if (typeof handler === 'function'){
+      try { out = handler(state, ctx) || out; }
+      catch(e){ out = { ok:false, error:'handler_error', message: String((e && e.message) || e) }; }
+    }
+    C.emitCombatEvent(state, (kind === 'spell') ? C.EVENTS.SPELL_CAST : C.EVENTS.ABILITY_EXECUTED,
+      { actorId: actor.id, contentId: contentId, targetIds: opts.targetIds || [] });
+    return out;
+  }
+  C.executeAbility = function(state, opts){ return executeVia(state, opts, 'ability'); };
+  C.castSpell = function(state, opts){ return executeVia(state, opts, 'spell'); };
+
+  /* -------------------- Reaction / passive registration helpers -------------------- */
+  C.registerReaction = function(state, id, spec){
+    var p = C.getParticipant(state, id);
+    if (!p) return err('invalid_participant');
+    spec = spec || {}; spec.kind = 'reaction';
+    p.reactions.push(spec);
+    return { ok:true };
+  };
+  C.registerPassive = function(state, id, spec){
+    var p = C.getParticipant(state, id);
+    if (!p) return err('invalid_participant');
+    spec = spec || {}; spec.kind = 'passive';
+    p.passives.push(spec);
+    return { ok:true };
+  };
+  C.getPendingReactions = function(state){ return state ? state.pendingReactions.slice() : []; };
+  C.clearPendingReactions = function(state){ if (state) state.pendingReactions = []; return { ok:true }; };
+
+})();
+
 SM.screens.roster=()=>{ const E=SM.engine,U=SM.ui;
   var entries=E.store.rosterEntries(); var activeId=E.store.activeId();
   var head=`<div class="section-head"><h3>Characters</h3><button class="btn primary sm" onclick="SM.roster.newChar()" aria-label="Create a new character">+ New Character</button> <button class="btn sm" onclick="SM.io.openImport()" aria-label="Import a character or backup file">Import</button> <button class="btn sm" onclick="SM.io.backup()" aria-label="Export all characters as a backup file">Backup All</button></div>`;
