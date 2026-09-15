@@ -9434,6 +9434,1364 @@ D.SHOPS=[{"id":"shop-haventide-general","name":"Haventide General Goods","npcId"
   SM._mcContract_installed=true;
 })();
 
+
+/* ===== PHASE 7 MODULE: mc_search.js ===== */
+/* mc_search.js — PHASE 7A: unified StormMythic discovery/search layer (SM.search).
+   Additive-only. Indexes EXISTING authoritative collections via existing accessors — no data
+   duplication, no second database. Deterministic normalization + scoring. Guarded SM._mcSearch_installed. */
+(function(){
+  if (typeof SM==='undefined' || !SM || !SM.data || !SM.engine) return;
+  if (SM._mcSearch_installed) return;
+  var D=SM.data, E=SM.engine, B=SM.bestiary, EN=SM.encounter;
+
+  var S = SM.search = SM.search || {};
+  S.VERSION = '7A.1';
+
+  /* ---------- normalization ---------- */
+  function norm(s){ return String(s==null?'':s).toLowerCase().replace(/[^a-z0-9]+/g,' ').replace(/\s+/g,' ').trim(); }
+  function singular(w){
+    if (w.length<=3) return w;
+    if (/ies$/.test(w)) return w.slice(0,-3)+'y';
+    if (/(ses|xes|zes|ches|shes)$/.test(w)) return w.slice(0,-2);
+    if (/ss$/.test(w)) return w;
+    if (/s$/.test(w)) return w.slice(0,-1);
+    return w;
+  }
+  function tokens(s){ return norm(s).split(' ').filter(Boolean).map(singular); }
+  S.normalize = function(s){ return norm(s); };
+  S.tokenize = tokens;
+
+  /* ---------- alias / synonym maps ---------- */
+  var TYPE_ALIAS = {
+    race:'kin', races:'kin', kin:'kin', ancestry:'kin', ancestries:'kin',
+    subrace:'lineage', subraces:'lineage', lineage:'lineage', lineages:'lineage', heritage:'lineage',
+    'class':'class', classes:'class', job:'class',
+    subclass:'discipline', subclasses:'discipline', discipline:'discipline', disciplines:'discipline', specialization:'discipline', specialisation:'discipline',
+    ability:'ability', abilities:'ability', skill:'ability', skills:'ability', feature:'ability', features:'ability',
+    spell:'magic', spells:'magic', magic:'magic', technique:'magic', techniques:'magic', power:'magic', powers:'magic', cantrip:'magic',
+    item:'item', items:'item', gear:'item', equipment:'item', weapon:'item', weapons:'item', armor:'item', armour:'item', shield:'item', shields:'item', accessory:'item', accessories:'item', consumable:'item', consumables:'item', relic:'item', relics:'item', material:'item', materials:'item',
+    creature:'creature', creatures:'creature', monster:'creature', monsters:'creature', enemy:'creature', enemies:'creature', beast:'creature', beasts:'creature', foe:'creature', foes:'creature', mob:'creature', boss:'creature', bosses:'creature', dragon:'creature', dragons:'creature',
+    npc:'npc', npcs:'npc', character:'npc', characters:'npc', person:'npc', people:'npc',
+    faction:'faction', factions:'faction', guild:'faction', guilds:'faction', order:'faction', orders:'faction',
+    encounter:'encounter', encounters:'encounter', fight:'encounter', fights:'encounter', battle:'encounter', battles:'encounter', raid:'encounter', raids:'encounter',
+    recipe:'recipe', recipes:'recipe', craft:'recipe', crafting:'recipe',
+    loot:'loot', treasure:'loot', hoard:'loot', drops:'loot', drop:'loot',
+    condition:'condition', conditions:'condition', status:'condition', ailment:'condition'
+  };
+  var ELEMENT_ALIAS = {
+    lightning:'lightning', electric:'lightning', shock:'lightning',
+    storm:'storm', thunder:'storm', tempest:'storm',
+    fire:'fire', flame:'fire', flaming:'fire', burning:'fire', ember:'fire',
+    frost:'frost', ice:'frost', cold:'frost', frozen:'frost', rime:'frost',
+    earth:'earth', stone:'earth', rock:'earth', ground:'earth',
+    water:'water', sea:'water', tide:'water', aqua:'water',
+    shadow:'shadow', dark:'shadow', darkness:'shadow', umbral:'shadow',
+    radiant:'radiant', light:'radiant', holy:'radiant', divine:'radiant', sun:'radiant',
+    void:'void', null:'void', abyss:'void',
+    arcane:'arcane', mystic:'arcane', runic:'arcane',
+    nature:'nature', natural:'nature', verdant:'nature',
+    poison:'poison', venom:'poison', toxic:'poison',
+    blood:'blood', sanguine:'blood',
+    wind:'wind', air:'wind', gale:'wind',
+    force:'force', kinetic:'force',
+    spirit:'spirit', ghost:'spirit', spectral:'spirit',
+    sonic:'sonic', sound:'sonic', resonant:'sonic',
+    physical:'physical'
+  };
+  var RARITY_SET = {}; (D.RARITIES||[]).forEach(function(r){ RARITY_SET[r]=1; });
+  var TIER_SET = { heroic:'Heroic', epic:'Epic', legendary:'Legendary', mythic:'Mythic', ascendant:'Ascendant' };
+  var BUCKET_SET = { common:1, beast:1, elite:1, boss:1, legendary:1, mythic:1, ascendant:1 };
+  S.ALIASES = { type:TYPE_ALIAS, element:ELEMENT_ALIAS };
+  S.version = '7A.1';
+
+  /* ---------- lazy index build (lightweight reference records) ---------- */
+  function classNameMap(){ var m={}; (D.CLASSES||[]).forEach(function(c){ m[norm(c.name)]=c.id; m[c.id]=c.id; }); return m; }
+  function kinNameMap(){ var m={}; (D.KIN||[]).forEach(function(k){ m[norm(k.name)]=k.id; m[k.id]=k.id; }); return m; }
+
+  function kw(){ var a=[]; for (var i=0;i<arguments.length;i++){ if(arguments[i]!=null) a.push(String(arguments[i])); } return norm(a.join(' ')); }
+  function rec(o){ return o; }
+
+  function buildIndex(){
+    var idx = [];
+    function push(o){ idx.push(o); }
+    // kin
+    (D.KIN||[]).forEach(function(k){ push(rec({ id:k.id, type:'kin', name:k.name, category:'Kin', ref:'kin',
+      keywords:kw(k.name,k.lore,k.desc,(k.traits||[]).join(' ')), tags:['kin'] })); });
+    // lineage
+    (D.LINEAGES||[]).forEach(function(l){ push(rec({ id:l.id, type:'lineage', name:l.name, category:'Lineage', ref:'lineage',
+      kinId:l.kin, keywords:kw(l.name,l.lore,l.trait), tags:['lineage', l.kin] })); });
+    // class
+    (D.CLASSES||[]).forEach(function(c){ push(rec({ id:c.id, type:'class', name:c.name, category:'Class', ref:'classlib',
+      role:c.role, keywords:kw(c.name,c.role,c.identity,c.lore), tags:['class', norm(c.role)] })); });
+    // discipline
+    (D.DISCIPLINES||[]).forEach(function(d){ push(rec({ id:d.id, type:'discipline', name:d.name, category:'Discipline', ref:'discipline',
+      classId:d.cls, keywords:kw(d.name,d.ident,d.build,d.lore), tags:['discipline', d.cls] })); });
+    // ability
+    (D.ABILITIES||[]).forEach(function(a){ push(rec({ id:a.id, type:'ability', name:a.name, category:'Ability', ref:'ability',
+      classId:a.cls, disciplineId:a.disc, level:a.level, keywords:kw(a.name,a.type,a.desc,(a.tags||[]).join(' ')), tags:(a.tags||[]).map(norm).concat(['ability']) })); });
+    // spell (base)
+    (D.SPELLS||[]).forEach(function(s){ push(rec({ id:s.id, type:'spell', name:s.name, category:s.school, ref:'spell',
+      level:s.level, keywords:kw(s.name,s.school,s.desc,(s.tags||[]).join(' ')), tags:['spell', norm(s.school)] })); });
+    // magic (453)
+    (D.MAGIC||[]).forEach(function(m){ push(rec({ id:m.id, type:'magic', name:m.name, category:m.category, ref:'magic',
+      classId:m.cls, disciplineId:m.disc, tier:m.tier, level:m.level, element:m.element, magicType:m.type,
+      compat:m.compat||[], keywords:kw(m.name,m.category,m.element,m.type,m.desc,(m.tags||[]).join(' ')), tags:['magic', norm(m.element), norm(m.category)] })); });
+    // items (1722 via merged library accessor)
+    (SM.lib.arr('item')||[]).forEach(function(it){ var slot=(SM.items&&SM.items.slotOf)?safe(function(){return SM.items.slotOf(it.id);}):null;
+      push(rec({ id:it.id, type:'item', name:it.name, category:it.type||it.cat||'Item', ref:'item',
+      rarity:it.rarity, slot:slot, weaponHands:(it.weapon&&it.weapon.hands)||null, damageType:it.dtype||null,
+      element:it.element||null, keywords:kw(it.name,it.type,it.cat,it.rarity,it.dtype,(it.props||[]).join(' '),it.desc), tags:['item', norm(it.rarity||''), norm(it.type||it.cat||'')] })); });
+    // creatures (698 via merged bestiary accessor)
+    (B.all()||[]).forEach(function(c){ push(rec({ id:c.id, type:'creature', name:c.name, category:c.category, ref:'bestiary',
+      bucket:c.bucket, role:c.combatRole||c.role, tier:c.tier, level:c.level, element:c.element, environment:c.environment,
+      rarity:c.rarity, factionId:c.faction||null, familyId:c.familyId, keywords:kw(c.name,c.category,c.bucket,c.role,c.element,c.environment,(c.tags||[]).join(' '),c.lore), tags:(c.tags||[]).map(norm).concat(['creature']) })); });
+    // npcs (180 via merged accessor)
+    (SM.lib.arr('npc')||[]).forEach(function(n){ push(rec({ id:n.id, type:'npc', name:n.name, category:n.prof||'NPC', ref:'npc',
+      kinId:n.kin, faction:n.faction, keywords:kw(n.name,n.prof,n.faction,n.personality,n.lore), tags:['npc', norm(n.kin||'')] })); });
+    // factions (32 via merged accessor)
+    (SM.lib.arr('factions')||[]).forEach(function(f){ push(rec({ id:f.id, type:'faction', name:f.name, category:f.align, ref:'factions',
+      keywords:kw(f.name,f.align,f.desc,(f.ranks||[]).join(' ')), tags:['faction', norm(f.align||'')] })); });
+    // encounters (88 merged)
+    (D.ENCOUNTERS||[]).concat(D.ENCOUNTERSX||[]).forEach(function(e){ push(rec({ id:e.id, type:'encounter', name:e.name, category:e.difficulty, ref:'encounter',
+      bucket:e.bucket, level:e.recommendedLevel, tier:e.recommendedTier, environment:e.environment, factionId:e.factionId,
+      keywords:kw(e.name,e.difficulty,e.environment,(e.tags||[]).join(' '),e.lore), tags:(e.tags||[]).map(norm).concat(['encounter']) })); });
+    // recipes (165 merged)
+    (D.RECIPES||[]).concat(D.RECIPESX||[]).forEach(function(r){ push(rec({ id:r.id, type:'recipe', name:r.name, category:r.category, ref:'crafting',
+      station:r.station, keywords:kw(r.name,r.category,r.station,(r.tags||[]).join(' ')), tags:['recipe', norm(r.station||'')] })); });
+    // loot (33 merged)
+    (D.LOOT||[]).concat(D.LOOTX||[]).forEach(function(l){ push(rec({ id:l.id, type:'loot', name:l.name, category:'Loot Table', ref:'bestiary',
+      tier:l.tier, keywords:kw(l.name,l.tier), tags:['loot', norm(l.tier||'')] })); });
+    // conditions
+    (D.CONDITIONS||[]).forEach(function(c){ push(rec({ id:c.id, type:'condition', name:c.name, category:c.kind||'Condition', ref:'conditions',
+      keywords:kw(c.name,c.kind,c.effects), tags:['condition'] })); });
+    return idx;
+  }
+  function safe(fn){ try{ return fn(); }catch(e){ return null; } }
+
+  S.build = function(force){ if (force || !S._idx){ S._idx = buildIndex(); S._byId = {}; S._idx.forEach(function(r){ S._byId[r.type+':'+r.id]=r; if(!S._byId[r.id]) S._byId[r.id]=r; }); } return S._idx; };
+  S.index = function(){ return S.build(); };
+  S.count = function(){ return S.build().length; };
+  S.types = function(){ var m={}; S.build().forEach(function(r){ m[r.type]=(m[r.type]||0)+1; }); return m; };
+  S.rebuild = function(){ return S.build(true); };
+  S.resolve = function(id, type){ S.build(); if (type && S._byId[type+':'+id]) return S._byId[type+':'+id]; return S._byId[id]||null; };
+
+  /* ---------- intent parsing ---------- */
+  S.parseIntent = function(q){
+    var nqRaw = norm(q);
+    var nq = ' '+nqRaw+' ';
+    var intent = { type:null, filters:{}, terms:[], _classCtx:null, _kinCtx:null };
+    // detect class/kin NAMES as context (applied conditionally in query), and mark their words
+    var removeWords = {};
+    function markName(name){ norm(name).split(' ').forEach(function(w){ if(w) removeWords[singular(w)]=1; }); }
+    (D.CLASSES||[]).forEach(function(c){ if (nq.indexOf(' '+norm(c.name)+' ')>=0){ intent._classCtx=c.id; markName(c.name); } });
+    (D.KIN||[]).forEach(function(k){ if (nq.indexOf(' '+norm(k.name)+' ')>=0){ intent._kinCtx=k.id; markName(k.name); } });
+    // two-handed
+    if (/(^|\s)(two handed|two hand|2h|twohanded|greatweapon|great weapon)(\s|$)/.test(nq)) { intent.filters.weaponHands='2h'; intent.type=intent.type||'item'; }
+    var toks = tokens(q);
+    for (var i=0;i<toks.length;i++){
+      var t = toks[i];
+      if (removeWords[t]) continue; // class/kin name word -> handled as context
+      if (TYPE_ALIAS[t]){ intent.type = TYPE_ALIAS[t];
+        if (t==='boss'||t==='bosses') intent.filters.bucket='boss';
+        if (t==='dragon'||t==='dragons') intent.filters.category='Dragon';
+        if (t==='material'||t==='materials') intent.filters.itemGroup='material';
+        if (t==='weapon'||t==='weapons') intent.filters.itemGroup='weapon';
+        if (t==='armor'||t==='armour') intent.filters.itemGroup='armor';
+        continue; }
+      if (ELEMENT_ALIAS[t]){ intent.filters.element=ELEMENT_ALIAS[t]; continue; }
+      if (RARITY_SET[t]){ intent.filters.rarity=t; intent._rarOrTier=t; continue; }
+      if (TIER_SET[t]){ intent.filters.tier=TIER_SET[t]; intent._rarOrTier=t; continue; }
+      if (/^\d+$/.test(t) && i>0 && (toks[i-1]==='level'||toks[i-1]==='lvl'||toks[i-1]==='lv')){ intent.filters.level=parseInt(t,10); continue; }
+      if (t==='level'||t==='lvl'||t==='lv'){ continue; }
+      if (t==='for'||t==='the'||t==='a'||t==='an'||t==='my'||t==='me'||t==='i'||t==='can'||t==='with'||t==='of'){ continue; }
+      intent.terms.push(t);
+    }
+    // resolve rarity-vs-tier ambiguity by type (item->rarity, creature/magic/encounter->tier)
+    if (intent._rarOrTier){ var v=intent._rarOrTier;
+      if (intent.type==='item'){ intent.filters.rarity=v; delete intent.filters.tier; }
+      else if (intent.type==='creature'||intent.type==='magic'||intent.type==='encounter'){ if(TIER_SET[v]){ intent.filters.tier=TIER_SET[v]; delete intent.filters.rarity; } }
+    }
+    delete intent._rarOrTier;
+    return intent;
+  };
+
+  /* ---------- filtering ---------- */
+  function matchFilters(r, f){
+    if (!f) return true;
+    if (f.type && r.type!==f.type) return false;
+    if (f.category && norm(r.category||'')!==norm(f.category)) return false;
+    if (f.rarity && norm(r.rarity||'')!==norm(f.rarity)) return false;
+    if (f.tier && norm(r.tier||'')!==norm(f.tier)) return false;
+    if (f.element && norm(r.element||'')!==norm(f.element)) return false;
+    if (f.bucket && norm(r.bucket||'')!==norm(f.bucket)) return false;
+    if (f.role && norm(r.role||'')!==norm(f.role)) return false;
+    if (f.classId && !(r.classId===f.classId || (r.compat&&r.compat.indexOf(f.classId)>=0))) return false;
+    if (f.disciplineId && r.disciplineId!==f.disciplineId) return false;
+    if (f.kinId && r.kinId!==f.kinId) return false;
+    if (f.lineageId && r.lineageId!==f.lineageId) return false;
+    if (f.factionId && r.factionId!==f.factionId) return false;
+    if (f.environment && norm(r.environment||'')!==norm(f.environment)) return false;
+    if (f.slot && norm(r.slot||'')!==norm(f.slot)) return false;
+    if (f.weaponHands && r.weaponHands!==f.weaponHands) return false;
+    if (f.damageType && norm(r.damageType||'')!==norm(f.damageType)) return false;
+    if (f.level!=null && Number(r.level)!==Number(f.level)) return false;
+    if (f.minLevel!=null && !(Number(r.level)>=f.minLevel)) return false;
+    if (f.maxLevel!=null && !(Number(r.level)<=f.maxLevel)) return false;
+    if (f.itemGroup){ var g=f.itemGroup, cat=norm(r.category||'');
+      if (g==='material' && cat.indexOf('material')<0 && (r.tags||[]).indexOf('material')<0) return false;
+      if (g==='weapon' && cat.indexOf('weapon')<0 && !r.weaponHands && !r.damageType) return false;
+      if (g==='armor' && cat.indexOf('armor')<0 && cat.indexOf('shield')<0) return false;
+    }
+    return true;
+  }
+  S.filter = function(records, f){ return (records||S.build()).filter(function(r){ return matchFilters(r,f); }); };
+
+  /* ---------- scoring (deterministic) ---------- */
+  var TYPE_PRIORITY = { kin:1, lineage:2, 'class':3, discipline:4, ability:5, spell:6, magic:7, item:8, creature:9, npc:10, faction:11, encounter:12, recipe:13, loot:14, condition:15 };
+  function scoreRec(r, qn, terms){
+    if (!qn) return 1; // no free-text -> filter-only, keep all with base score
+    var name = norm(r.name), id = String(r.id).toLowerCase();
+    var score = 0;
+    if (name===qn) score = Math.max(score,100);
+    if (id===qn) score = Math.max(score,95);
+    if (name.indexOf(qn)===0) score = Math.max(score,70);
+    if (name.indexOf(qn)>=0) score = Math.max(score,55);
+    if (norm(r.category||'')===qn) score = Math.max(score,30);
+    // token coverage in keywords
+    var kws = r.keywords||'';
+    var hit=0; for (var i=0;i<terms.length;i++){ if (kws.indexOf(terms[i])>=0) hit++; }
+    if (terms.length){ if (hit===terms.length) score=Math.max(score,45); else if (hit>0) score=Math.max(score,15+hit*3); }
+    // tag match
+    if ((r.tags||[]).some(function(t){ return terms.indexOf(t)>=0; })) score=Math.max(score,20);
+    return score;
+  }
+
+  /* ---------- query ---------- */
+  S.query = function(q, opts){
+    opts = opts || {};
+    S.build();
+    var intent = S.parseIntent(q||'');
+    var filters = {};
+    var k; for (k in intent.filters) filters[k]=intent.filters[k];
+    if (intent.type && !filters.type) filters.type = intent.type;
+    if (opts.filters){ for (k in opts.filters){ if(opts.filters[k]!=null) filters[k]=opts.filters[k]; } }
+    if (opts.type) filters.type = opts.type;
+    var effType = filters.type || null;
+    var terms = intent.terms.slice();
+    if (intent._classCtx){
+      if (effType==='magic'||effType==='ability'||effType==='discipline'){ filters.classId=intent._classCtx; }
+      else { var cn=(D.CLASSES||[]).filter(function(x){return x.id===intent._classCtx;})[0]; if(cn) terms.push(norm(cn.name)); }
+    }
+    if (intent._kinCtx){
+      if (effType==='lineage'||effType==='npc'||effType==='creature'){ filters.kinId=intent._kinCtx; }
+      else { var kn=(D.KIN||[]).filter(function(x){return x.id===intent._kinCtx;})[0]; if(kn) terms.push(norm(kn.name)); }
+    }
+    var qn = terms.join(' ');
+    var pool = S._idx.filter(function(r){ return matchFilters(r, filters); });
+    var scored = [];
+    for (var i=0;i<pool.length;i++){ var sc = scoreRec(pool[i], qn, terms); if (sc>0){ scored.push({ r:pool[i], s:sc }); } }
+    scored.sort(function(a,b){
+      if (b.s!==a.s) return b.s-a.s;
+      var pa=TYPE_PRIORITY[a.r.type]||99, pb=TYPE_PRIORITY[b.r.type]||99; if (pa!==pb) return pa-pb;
+      var na=norm(a.r.name), nb=norm(b.r.name); if (na<nb) return -1; if (na>nb) return 1;
+      return String(a.r.id)<String(b.r.id)?-1:(String(a.r.id)>String(b.r.id)?1:0);
+    });
+    var offset=Math.max(0, opts.offset||0), limit=opts.limit==null?24:opts.limit;
+    var items = scored.slice(offset, limit?offset+limit:undefined).map(function(x){ return x.r; });
+    return { query:q||'', normalizedQuery:qn, intent:{ type:filters.type||null, filters:filters }, total:scored.length, offset:offset, limit:limit, items:items };
+  };
+  S.find = function(q, opts){ return S.query(q, opts).items; };
+  S.suggest = function(q, n){ return S.query(q, { limit:n||8 }).items.map(function(r){ return { id:r.id, type:r.type, name:r.name }; }); };
+
+  /* ---------- character-aware search ---------- */
+  S.forCharacter = function(c, kind, opts){
+    opts = opts || {};
+    if (!c) return { items:[], total:0, note:'no-character' };
+    kind = kind || 'all';
+    if (kind==='equipment' || kind==='item' || kind==='weapons' || kind==='gear'){
+      var items = (SM.lib.arr('item')||[]).filter(function(it){
+        if (kind==='weapons' && !(it.type==='Weapon'||it.dmg)) return false;
+        var r = safe(function(){ return SM.equipment.canEquip(c, it.id); });
+        return r && (r.ok===true || r===true);
+      });
+      var lim = opts.limit==null?24:opts.limit;
+      return { items:items.slice(0, lim||undefined).map(function(it){ return S.resolve(it.id,'item')||{ id:it.id, type:'item', name:it.name }; }), total:items.length, kind:'equippable' };
+    }
+    if (kind==='magic' || kind==='spells'){
+      var res = safe(function(){ return SM.magic.getUsable ? SM.magic.getUsable(c) : null; });
+      var usable = Array.isArray(res) ? res : (res && (res.usable||res.available||res.items||res.magic||res.list)) || null;
+      if (!Array.isArray(usable)){ var cls=(c.classes||[])[0]; var r2 = safe(function(){ return cls && SM.magic.getCompatibleForClass ? SM.magic.getCompatibleForClass(cls.classId) : []; });
+        usable = Array.isArray(r2) ? r2 : (r2 && (r2.usable||r2.available||r2.items||r2.magic||r2.list)) || []; }
+      if (!Array.isArray(usable)) usable=[];
+      var lim2 = opts.limit==null?24:opts.limit;
+      var arr = usable.slice(0, lim2||undefined).map(function(m){ return S.resolve(m.id,'magic')||{ id:m.id, type:'magic', name:m.name }; });
+      return { items:arr, total:usable.length, kind:'usable-magic' };
+    }
+    return { items:[], total:0, note:'unknown-kind' };
+  };
+
+  /* ---------- related content / cross-links (only legitimate relationships) ---------- */
+  S.related = function(id, type){
+    S.build();
+    var r = S.resolve(id, type); if (!r) return [];
+    var out = [];
+    function add(rec2, rel){ if (rec2){ out.push({ rel:rel, id:rec2.id, type:rec2.type, name:rec2.name, ref:rec2.ref }); } }
+    function findRecs(pred, rel, cap){ var n=0; for (var i=0;i<S._idx.length;i++){ if(pred(S._idx[i])){ add(S._idx[i], rel); if(++n>=(cap||8)) break; } } }
+    switch(r.type){
+      case 'class':
+        findRecs(function(x){ return x.type==='discipline' && x.classId===r.id; }, 'discipline', 12);
+        findRecs(function(x){ return x.type==='ability' && x.classId===r.id; }, 'ability', 8);
+        findRecs(function(x){ return x.type==='magic' && (x.classId===r.id || (x.compat&&x.compat.indexOf(r.id)>=0)); }, 'magic', 8);
+        break;
+      case 'kin':
+        findRecs(function(x){ return x.type==='lineage' && x.kinId===r.id; }, 'lineage', 20);
+        break;
+      case 'lineage':
+        add(S.resolve(r.kinId,'kin'), 'kin');
+        break;
+      case 'discipline':
+        add(S.resolve(r.classId,'class'), 'class');
+        findRecs(function(x){ return x.type==='ability' && x.disciplineId===r.id; }, 'ability', 8);
+        findRecs(function(x){ return x.type==='magic' && x.disciplineId===r.id; }, 'magic', 8);
+        break;
+      case 'ability': add(S.resolve(r.classId,'class'),'class'); if(r.disciplineId) add(S.resolve(r.disciplineId,'discipline'),'discipline'); break;
+      case 'magic': if(r.classId) add(S.resolve(r.classId,'class'),'class'); if(r.disciplineId) add(S.resolve(r.disciplineId,'discipline'),'discipline'); break;
+      case 'creature':
+        if (r.factionId) add(S.resolve(r.factionId,'faction'),'faction');
+        // encounters that reference this creature
+        (D.ENCOUNTERS||[]).concat(D.ENCOUNTERSX||[]).forEach(function(e){ if((e.enemies||[]).indexOf(r.id)>=0 || e.boss===r.id){ add(S.resolve(e.id,'encounter'),'encounter'); } });
+        break;
+      case 'npc': if (r.faction){ var f=(SM.lib.arr('factions')||[]).filter(function(x){return x.name===r.faction;})[0]; if(f) add(S.resolve(f.id,'faction'),'faction'); } break;
+      case 'faction':
+        findRecs(function(x){ return x.type==='creature' && x.factionId===r.id; }, 'creature', 8);
+        findRecs(function(x){ return x.type==='encounter' && x.factionId===r.id; }, 'encounter', 8);
+        break;
+      case 'encounter':
+        var enc=(D.ENCOUNTERS||[]).concat(D.ENCOUNTERSX||[]).filter(function(x){return x.id===r.id;})[0];
+        if (enc){ (enc.enemies||[]).slice(0,6).forEach(function(cid){ add(S.resolve(cid,'creature'),'creature'); }); if(enc.boss) add(S.resolve(enc.boss,'creature'),'boss'); if(enc.factionId) add(S.resolve(enc.factionId,'faction'),'faction'); }
+        break;
+      case 'recipe':
+        var rp=(D.RECIPES||[]).concat(D.RECIPESX||[]).filter(function(x){return x.id===r.id;})[0];
+        if (rp){ if(rp.result) add(S.resolve(rp.result.itemId,'item'),'crafts'); (rp.ingredients||[]).slice(0,6).forEach(function(i){ add(S.resolve(i.itemId,'item'),'material'); }); }
+        break;
+    }
+    // de-dup
+    var seen={}, uniq=[]; out.forEach(function(x){ var k=x.type+':'+x.id; if(!seen[k]){ seen[k]=1; uniq.push(x); } });
+    return uniq;
+  };
+
+  /* ---------- breadcrumbs ---------- */
+  S.breadcrumbs = function(id, type){
+    var r = S.resolve(id, type); if(!r) return [{ label:'StormMythic', ref:'home' }];
+    var cats = { creature:'Bestiary', magic:'Magic', item:'Items', npc:'NPCs', faction:'Factions', encounter:'Encounters', recipe:'Crafting', kin:'Kin', lineage:'Lineages', 'class':'Classes', discipline:'Disciplines', ability:'Abilities', spell:'Spells', condition:'Conditions', loot:'Loot' };
+    var crumbs=[{ label:'StormMythic', ref:'home' }, { label:cats[r.type]||r.type, ref:r.ref }];
+    if (r.type==='creature' && r.category) crumbs.push({ label:r.category, ref:r.ref });
+    crumbs.push({ label:r.name, ref:r.ref, id:r.id, terminal:true });
+    return crumbs;
+  };
+
+  SM._mcSearch_installed = true;
+})();
+
+/* ===== PHASE 7 MODULE: mc_ai.js ===== */
+/* ============================================================================
+ * mc_ai.js  —  Phase 7-AI  —  Provider-neutral AI adapter (SM.ai)
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads AFTER mc_search.js.
+ *
+ * Design contract (Phase 7 hard rules):
+ *  - Provider-neutral. A real LLM would plug in via registerProvider(); this
+ *    phase ships NO remote provider, so isAvailable()===false everywhere.
+ *  - Static hosting: NO network or dynamic-code primitives (no fetch, no XHR,
+ *    no socket streams, no dynamic eval, no Function constructor).
+ *    The offline engine is fully deterministic (seeded RNG) and composes ONLY
+ *    from real, authoritative game content (via SM.search) — it NEVER invents
+ *    mechanics or numbers and NEVER claims to be an AI model.
+ *  - Everything it produces is flagged suggested:true and carries disclaimer().
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM === 'undefined' || !SM) return;
+  if (SM._mcAi_installed) return;
+  SM._mcAi_installed = true;
+
+  var AI = SM.ai = SM.ai || {};
+  AI.version = '7-AI.1';
+  AI.isLLM   = false; // this build never runs a real model
+
+  /* ---------------------------------------------------------------- RNG ---
+   * Deterministic seeded generator (xmur3 -> mulberry32). Same seed always
+   * yields the same sequence, so all "generated" content is reproducible.
+   */
+  function xmur3(str){
+    var h = 1779033703 ^ str.length;
+    for (var i=0;i<str.length;i++){
+      h = Math.imul(h ^ str.charCodeAt(i), 3432918353);
+      h = (h << 13) | (h >>> 19);
+    }
+    return function(){
+      h = Math.imul(h ^ (h>>>16), 2246822507);
+      h = Math.imul(h ^ (h>>>13), 3266489909);
+      h ^= h >>> 16;
+      return h >>> 0;
+    };
+  }
+  function mulberry32(a){
+    return function(){
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a>>>15), 1 | a);
+      t = (t + Math.imul(t ^ (t>>>7), 61 | t)) ^ t;
+      return ((t ^ (t>>>14)) >>> 0) / 4294967296;
+    };
+  }
+  AI.hash = function(v){ return xmur3(typeof v==='string' ? v : JSON.stringify(v))() >>> 0; };
+  AI.rng  = function(seed){ return mulberry32(xmur3(String(seed==null?'seed':seed))()); };
+  function pick(arr, rnd){ if (!arr || !arr.length) return null; return arr[Math.floor((rnd?rnd():0.0) * arr.length) % arr.length]; }
+  AI.pick = pick;
+  // seeded, non-repeating sample of n items from arr (stable for a given seed)
+  AI.sample = function(arr, n, seed){
+    arr = (arr||[]).slice(); var rnd = AI.rng(seed);
+    for (var i=arr.length-1;i>0;i--){ var j = Math.floor(rnd()*(i+1)); var t=arr[i]; arr[i]=arr[j]; arr[j]=t; }
+    return n==null ? arr : arr.slice(0, n);
+  };
+
+  /* --------------------------------------------------------- providers ---
+   * Registry is provider-neutral. The only shipped provider is the local
+   * deterministic engine. A real provider would be registered at runtime by
+   * an integration that supplies a transport — which static hosting forbids,
+   * so isAvailable() stays false until such a local provider exists.
+   */
+  var providers = {};
+  AI.DETERMINISTIC = 'deterministic';
+  providers[AI.DETERMINISTIC] = {
+    id:'deterministic', name:'Offline Generator', transport:'local',
+    isLLM:false, enabled:true
+  };
+  AI._providerId = AI.DETERMINISTIC;
+
+  AI.registerProvider = function(id, adapter){
+    if (!id) return false;
+    adapter = adapter || {};
+    adapter.id = id;
+    if (adapter.isLLM == null)     adapter.isLLM = true;
+    if (adapter.transport == null) adapter.transport = 'remote';
+    if (adapter.enabled == null)   adapter.enabled = true;
+    providers[id] = adapter;
+    return true;
+  };
+  AI.unregisterProvider = function(id){ if (id && id!==AI.DETERMINISTIC){ delete providers[id]; if (AI._providerId===id) AI._providerId=AI.DETERMINISTIC; return true; } return false; };
+  AI.listProviders = function(){
+    var out=[]; for (var k in providers){ var p=providers[k];
+      out.push({ id:k, name:p.name||k, transport:p.transport, isLLM:!!p.isLLM, enabled:!!p.enabled }); }
+    return out;
+  };
+  AI.getProvider = function(){ return providers[AI._providerId] || providers[AI.DETERMINISTIC]; };
+  AI.setProvider = function(id){ if (providers[id] && providers[id].enabled){ AI._providerId=id; return true; } return false; };
+
+  // A real model is only "available" if a LOCAL, enabled provider with a
+  // complete() implementation is wired. No network transports are shipped.
+  AI.isAvailable = function(){
+    var p = AI.getProvider();
+    return !!(p && p.isLLM && p.enabled && p.transport==='local' && typeof p.complete==='function');
+  };
+  AI.status = function(){
+    var p = AI.getProvider();
+    var avail = AI.isAvailable();
+    return { provider:p.id, providerName:p.name||p.id, available:avail, mode: avail?'assisted':'offline', isLLM:!!(avail && p.isLLM) };
+  };
+  AI.label = function(){ return AI.isAvailable() ? 'AI-Assisted' : 'Suggested Content'; };
+  AI.disclaimer = function(){
+    return AI.isAvailable()
+      ? 'Generated with a connected AI provider. Review before use.'
+      : 'Suggested content assembled offline by a deterministic helper (not an AI model) from existing game data. Not official content — review and edit before use.';
+  };
+
+  /* --------------------------------------------------------- complete ---
+   * Generic completion. Routes to a wired local provider when available;
+   * otherwise falls back to the deterministic composer. Never touches the
+   * network in this build.
+   */
+  AI.complete = function(prompt, opts){
+    opts = opts || {};
+    var p = AI.getProvider();
+    if (AI.isAvailable() && typeof p.complete === 'function'){
+      try {
+        var r = p.complete(prompt, opts);
+        var txt = (r && (r.text!=null?r.text:r)) ;
+        return { text:String(txt==null?'':txt), provider:p.id, isLLM:true, suggested:true };
+      } catch(e){ /* fall through to deterministic */ }
+    }
+    return {
+      text: AI._deterministicText(prompt, opts),
+      provider: AI.DETERMINISTIC, isLLM:false, suggested:true,
+      disclaimer: AI.disclaimer()
+    };
+  };
+  AI._deterministicText = function(prompt, opts){
+    var q = typeof prompt==='string' ? prompt : (prompt && (prompt.text||prompt.query)) || '';
+    // Ground any freeform completion in real matching content when possible.
+    var a = AI.ask(q, { limit: (opts&&opts.limit)||6 });
+    return a.answer;
+  };
+
+  /* -------------------------------------------------------------- ask ---
+   * Deterministic Q&A over game content. Reuses SM.search (single source of
+   * truth) — no second index, no fabricated facts. Answer text is composed
+   * only from real record names/types the search returned.
+   */
+  AI.ask = function(query, ctx){
+    query = query || ''; ctx = ctx || {};
+    // Empty query -> deterministic guidance, no fabricated sources.
+    if (!String(query).trim()){
+      return {
+        answer:  AI._composeAnswer('', { type:null, filters:{} }, [], { total:0 }),
+        intent:  { type:null, filters:{} },
+        sources: [], total:0,
+        provider:AI.DETERMINISTIC, isLLM:false, suggested:true, disclaimer:AI.disclaimer()
+      };
+    }
+    var res;
+    try {
+      res = (SM.search && SM.search.query) ? SM.search.query(query, { limit: ctx.limit||8, character: ctx.character||null }) : { items:[], total:0 };
+    } catch(e){ res = { items:[], total:0 }; }
+    // Prefer the search result's EFFECTIVE intent (post class/kin context resolution).
+    var intent = (res && res.intent) ? res.intent : { type:null, filters:{} };
+    var items = (res && res.items) || [];
+    return {
+      answer:  AI._composeAnswer(query, intent, items, res),
+      intent:  { type:intent.type||null, filters:intent.filters||{} },
+      sources: items.slice(0,8).map(function(r){ return { id:r.id, type:r.type, name:r.name }; }),
+      total:   (res && res.total!=null) ? res.total : items.length,
+      provider:AI.DETERMINISTIC, isLLM:false, suggested:true,
+      disclaimer: AI.disclaimer()
+    };
+  };
+  AI._composeAnswer = function(query, intent, items, res){
+    var q = String(query||'').trim();
+    if (!q) return 'Ask about game content — for example: "storm dragons", "fire spells for Mystic", "two-handed weapons", or "legendary items".';
+    if (!items.length) return 'No matching content found for "'+q+'". Try a broader term, or a type such as item, magic, creature, kin, class, discipline, or faction.';
+    var total = (res && res.total!=null) ? res.total : items.length;
+    var typeLabel = intent && intent.type ? intent.type : ((items[0] && items[0].type) || 'result');
+    var plural = total===1 ? '' : 's';
+    var lead = 'Found ' + total + ' ' + typeLabel + plural + ' matching "' + q + '". Top matches:';
+    var lines = items.slice(0,6).map(function(r,i){
+      var extra = [];
+      if (r.element)  extra.push(r.element);
+      if (r.rarity)   extra.push(r.rarity);
+      if (r.tier!=null) extra.push('tier '+r.tier);
+      var tag = extra.length ? ' — ' + extra.join(', ') : '';
+      return (i+1) + '. ' + r.name + ' [' + r.type + ']' + tag;
+    });
+    return lead + '\n' + lines.join('\n');
+  };
+
+  /* --------------------------------------------------------- suggestors ---
+   * Domain generators (character builds, campaigns, etc.) register here from
+   * 7B/7C modules. Keeps SM.ai a thin dispatcher; domain logic stays with the
+   * authoritative systems it belongs to.
+   */
+  var suggestors = {};
+  AI.registerSuggestor = function(kind, fn){ if (kind && typeof fn==='function'){ suggestors[kind]=fn; return true; } return false; };
+  AI.hasSuggestor = function(kind){ return typeof suggestors[kind]==='function'; };
+  AI.suggest = function(kind, ctx){
+    ctx = ctx || {};
+    var fn = suggestors[kind];
+    if (!fn) return { error:'no suggestor registered for "'+kind+'"', kind:kind, provider:AI.DETERMINISTIC, isLLM:false, suggested:true };
+    try {
+      var r = fn(ctx) || {};
+      if (r.provider == null)  r.provider = AI.DETERMINISTIC;
+      if (r.isLLM == null)     r.isLLM = false;
+      if (r.suggested == null) r.suggested = true;
+      if (r.disclaimer == null) r.disclaimer = AI.disclaimer();
+      return r;
+    } catch(e){
+      return { error:String((e && e.message) || e), kind:kind, provider:AI.DETERMINISTIC, isLLM:false, suggested:true };
+    }
+  };
+
+  /* ---------------------------------------------------------- narrate ---
+   * Deterministic flavor text. Slots ONLY real fields supplied in `data`
+   * (name, element, role, kind…) into seeded templates. Never invents stats.
+   * Missing fields are simply omitted. Output is always marked suggested.
+   */
+  var NARR = {
+    creature: [
+      'The {name} stalks the wilds{elem}, a threat best met with preparation.',
+      'Few tales agree on the {name}{elem}, but all end the same way — cautiously.',
+      'Scouts mark the {name} on their maps{elem} and give it a wide berth.'
+    ],
+    npc: [
+      'The {name}{role} keeps their own counsel, offering aid to those who prove worthy.',
+      'Ask around any settlement and the {name}{role} is spoken of — for good or ill.',
+      'The {name}{role} has a stake in what comes next.'
+    ],
+    quest: [
+      'Word spreads of {name}: a task with more beneath it than first appears.',
+      '{name} begins simply enough — such things rarely stay that way.',
+      'Those who take up {name} seldom return unchanged.'
+    ],
+    location: [
+      '{name} sits at the edge of the known, drawing the desperate and the bold.',
+      'Travelers speak of {name} in low voices, and never after dark.',
+      'Whatever {name} once was, it is something else now.'
+    ],
+    campaign: [
+      'The chronicle of {name} opens on uneasy ground, with more at stake than any one hero.',
+      '{name} gathers its threads slowly — a rumor here, a ruin there — until they pull taut.',
+      'They will remember how {name} began, long after they forget who lived to see it end.'
+    ],
+    item: [
+      'The {name}{rar} carries a history its bearer may never fully learn.',
+      'Craftsmen study the {name}{rar} and disagree on how it was ever made.',
+      'The {name}{rar} answers to a steady hand.'
+    ]
+  };
+  function slot(tpl, map){
+    return tpl.replace(/\{(\w+)\}/g, function(m,k){ return (map[k]!=null) ? String(map[k]) : ''; });
+  }
+  AI.narrate = function(kind, data){
+    data = data || {};
+    kind = NARR[kind] ? kind : 'quest';
+    var bank = NARR[kind];
+    var name = data.name || data.title || 'the unknown';
+    var elem = data.element ? (' born of ' + data.element) : '';
+    var role = data.role ? (', a ' + data.role + ',') : (data.kind ? (', a ' + data.kind + ',') : '');
+    var rar  = data.rarity ? (' (' + data.rarity + ')') : '';
+    var rnd  = AI.rng(kind + ':' + AI.hash(data));
+    var tpl  = bank[Math.floor(rnd()*bank.length) % bank.length];
+    var text = slot(tpl, { name:name, elem:elem, role:role, rar:rar }).replace(/\s+/g,' ').trim();
+    return { text:text, kind:kind, provider:AI.DETERMINISTIC, isLLM:false, suggested:true, disclaimer:AI.disclaimer() };
+  };
+
+  // convenience: mark any generated payload uniformly
+  AI.mark = function(obj){ obj = obj || {}; if (obj.suggested==null) obj.suggested=true; if (obj.provider==null) obj.provider=AI.DETERMINISTIC; if (obj.isLLM==null) obj.isLLM=false; if (obj.disclaimer==null) obj.disclaimer=AI.disclaimer(); return obj; };
+
+})();
+
+/* ===== PHASE 7 MODULE: mc_charassist.js ===== */
+/* ============================================================================
+ * mc_charassist.js  —  Phase 7B  —  AI Character Creation Assistant (SM.charassist)
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads AFTER mc_search.js and mc_ai.js.
+ *
+ * INTEGRATES the existing Character Forge — it NEVER replaces it and NEVER
+ * mutates a character itself. All recommendations are READ-ONLY and derive
+ * from authoritative systems:
+ *   - eligibility: SM.magic.getUsable / getCompatibleForClass, SM.equipment.canEquip,
+ *     SM.items.isEquippable/slotOf, E.* derived helpers
+ *   - content:     D.ABILITIES / D.MAGIC / D.DISCIPLINES / D.LINEAGES (no dup DB)
+ * The ONLY write path is apply(), which DELEGATES to SM.forge.* (the Forge owns
+ * mutation). No eval / Function / network. Suggested builds are marked suggested.
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM === 'undefined' || !SM) return;
+  if (SM._mcCharassist_installed) return;
+  SM._mcCharassist_installed = true;
+
+  var E = SM.engine, D = SM.data;
+  var A = SM.charassist = SM.charassist || {};
+  A.version = '7B.1';
+
+  function T(fn, dflt){ try { return fn(); } catch(e){ return dflt===undefined?null:dflt; } }
+  function byId(list, id){ list=list||[]; for (var i=0;i<list.length;i++){ if (list[i] && list[i].id===id) return list[i]; } return null; }
+  function idOf(x){ return (x && typeof x==='object') ? x.id : x; }
+  function AR(x){ return Array.isArray(x) ? x : []; } // hardening: tolerate malformed (non-array) fields
+
+  /* ------------------------------------------------------------- context ---
+   * Read-only snapshot of a character resolved through E.* accessors. Never
+   * writes to the character.
+   */
+  A._equipSummary = function(c){
+    return T(function(){
+      if (SM.equipment && SM.equipment.getLoadout) return SM.equipment.getLoadout(c);
+      if (SM.equipment && SM.equipment.getEquipped) return SM.equipment.getEquipped(c);
+      return null;
+    });
+  };
+  A._equippedIds = function(c){
+    var ids = {}; var eq = A._equipSummary(c);
+    if (eq && typeof eq==='object'){
+      var vals = Array.isArray(eq) ? eq : Object.keys(eq).map(function(k){ return eq[k]; });
+      vals.forEach(function(v){ var id = idOf(v && v.item ? v.item : v); if (id) ids[id]=1; });
+    }
+    return ids;
+  };
+  A.context = function(c){
+    c = c || {};
+    var kin     = T(function(){ var r = E.kin ? E.kin(c) : null; if (r && r.name) return r; r = E.kin ? E.kin(c.kinId) : null; if (r && r.name) return r; return byId(D.KIN, c.kinId); });
+    var lineage = T(function(){ if (!c.lineageId) return null; var r = E.lineage ? E.lineage(c) : null; if (r && r.name) return r; r = E.lineage ? E.lineage(c.lineageId) : null; if (r && r.name) return r; return byId(D.LINEAGES, c.lineageId); });
+    var attrs   = T(function(){ return E.attrs ? E.attrs(c) : (c.attrsBase||{}); }, {});
+    var total   = T(function(){ return E.totalLevel ? E.totalLevel(c) : null; });
+    if (total==null) total = AR(c.classes).reduce(function(a,x){ return a + (x.level||0); }, 0);
+    var classes = AR(c.classes).map(function(cl){
+      var cd = byId(D.CLASSES, cl.classId);
+      var dd = cl.discId ? byId(D.DISCIPLINES, cl.discId) : null;
+      return { classId:cl.classId, level:cl.level||0, discId:cl.discId||null,
+               className: cd?cd.name:cl.classId, role: cd?(cd.role||null):null,
+               discName: dd?dd.name:null };
+    });
+    return {
+      id:c.id||null, name:c.name||'(unnamed)',
+      kinId:c.kinId||null,     kinName: kin?kin.name:null,
+      lineageId:c.lineageId||null, lineageName: lineage?lineage.name:null,
+      classes:classes, totalLevel:total, tier:c.tier||null,
+      attrs:attrs||{},
+      maxHP: T(function(){ return E.maxHP ? E.maxHP(c) : null; }),
+      resource: T(function(){ return E.resource ? E.resource(c) : null; }),
+      abilityCount:AR(c.abilities).length, spellCount:AR(c.spells).length,
+      equipped: A._equipSummary(c)
+    };
+  };
+
+  /* ---------------------------------------------------- recommendations ---
+   * Every recommender is read-only and filters real collections through the
+   * authoritative eligibility rules. Nothing here decides mechanics itself.
+   */
+  A.recommendAbilities = function(c, opts){
+    opts = opts || {}; c = c || {};
+    var have = {}; AR(c.abilities).forEach(function(a){ have[idOf(a)] = 1; });
+    var clsById = {}; AR(c.classes).forEach(function(cl){ clsById[cl.classId] = cl; });
+    var out = (D.ABILITIES||[]).filter(function(ab){
+      if (have[ab.id]) return false;
+      if (ab.cls && !clsById[ab.cls]) return false;      // must own the class
+      var cl = ab.cls ? clsById[ab.cls] : AR(c.classes)[0];
+      if (ab.disc){
+        if (!cl || !cl.discId) return false;              // discipline not chosen yet
+        if (ab.disc !== cl.discId) return false;          // wrong discipline
+      }
+      if (ab.level != null && cl && (cl.level||0) < ab.level) return false; // under level
+      return true;
+    }).map(function(ab){ return { id:ab.id, type:'ability', name:ab.name, cls:ab.cls||null, disc:ab.disc||null, level:ab.level!=null?ab.level:null }; });
+    return { items: opts.limit ? out.slice(0, opts.limit) : out, total:out.length, kind:'abilities' };
+  };
+
+  A.recommendMagic = function(c, opts){
+    opts = opts || {}; c = c || {};
+    var have = {}; AR(c.spells).forEach(function(s){ have[idOf(s)] = 1; });
+    var res = T(function(){ return (SM.magic && SM.magic.getUsable) ? SM.magic.getUsable(c) : null; });
+    var usable = Array.isArray(res) ? res : (res && (res.usable||res.available||res.list||res.magic)) || null;
+    if (!Array.isArray(usable)){
+      var acc = [];
+      AR(c.classes).forEach(function(cl){
+        var r = T(function(){ return (SM.magic && SM.magic.getCompatibleForClass) ? SM.magic.getCompatibleForClass(cl.classId) : null; });
+        if (Array.isArray(r)) acc = acc.concat(r);
+      });
+      usable = acc;
+    }
+    usable = usable || [];
+    var seen = {}, out = [];
+    usable.forEach(function(m){
+      var id = idOf(m); if (id==null || have[id] || seen[id]) return; seen[id] = 1;
+      var rec = T(function(){ return (SM.search && SM.search.resolve) ? SM.search.resolve(id, 'magic') : null; });
+      out.push(rec || { id:id, type:'magic', name:(m && m.name) || id });
+    });
+    return { items: opts.limit ? out.slice(0, opts.limit) : out, total:out.length, kind:'magic' };
+  };
+
+  A.recommendEquipment = function(c, opts){
+    opts = opts || {}; c = c || {};
+    var lim = opts.limit || 24;
+    var pool = T(function(){ return (SM.items && SM.items.all) ? SM.items.all() : null; });
+    if (!pool || !pool.length) pool = T(function(){ return E.allItems ? E.allItems() : []; }, []) || [];
+    var equipped = A._equippedIds(c);
+    var out = [];
+    for (var i=0; i<pool.length && out.length < lim; i++){
+      var it = pool[i]; if (!it || equipped[it.id]) continue;
+      var isEq = T(function(){ return (SM.items && SM.items.isEquippable) ? SM.items.isEquippable(it) : null; });
+      if (isEq === false) continue;
+      var can = T(function(){
+        if (SM.equipment && SM.equipment.canEquip){
+          var r = SM.equipment.canEquip(c, it);
+          return (r===true) || (r && (r.ok===true || r.canEquip===true || r.allowed===true));
+        }
+        return false;
+      }, false);
+      if (!can) continue;
+      out.push({ id:it.id, type:'item', name:it.name, cat:it.cat||null, rarity:it.rarity||null,
+                 slot: T(function(){ return (SM.items && SM.items.slotOf) ? SM.items.slotOf(it) : null; }) });
+    }
+    return { items:out, total:out.length, kind:'equippable' };
+  };
+
+  A.recommendDisciplines = function(c, classId){
+    c = c || {};
+    if (!classId){ var cl = AR(c.classes)[0]; classId = cl ? cl.classId : null; }
+    var out = (D.DISCIPLINES||[]).filter(function(d){ return d.cls === classId; })
+      .map(function(d){ return { id:d.id, type:'discipline', name:d.name, cls:d.cls }; });
+    return { items:out, total:out.length, kind:'disciplines', classId:classId };
+  };
+
+  A.recommendLineages = function(c){
+    c = c || {}; var kinId = c.kinId || null;
+    var out = T(function(){ return E.lineagesFor ? E.lineagesFor(kinId) : null; });
+    if (!Array.isArray(out) || !out.length) out = (D.LINEAGES||[]).filter(function(l){ return l.kin === kinId; });
+    out = out.map(function(l){ return { id:l.id, type:'lineage', name:l.name, kin:l.kin }; });
+    return { items:out, total:out.length, kind:'lineages', kinId:kinId };
+  };
+
+  /* -------------------------------------------------------------- analyze ---
+   * Gap analysis -> actionable issues, each carrying a Forge handoff descriptor
+   * (never executed here).
+   */
+  A.analyze = function(c){
+    c = c || {}; var issues = [];
+    function add(kind, sev, msg, action){ issues.push({ kind:kind, severity:sev, msg:msg, action:action||null }); }
+    if (!c.kinId) add('kin','high','No kin selected.', { via:'creator', field:'kinId' });
+    if (c.kinId && !c.lineageId){
+      var lin = A.recommendLineages(c);
+      add('lineage','medium','No lineage chosen'+(c.kinId?(' for '+c.kinId):'')+'.', { via:'forge', method:'setLineage', options:lin.items.slice(0,6) });
+    }
+    AR(c.classes).forEach(function(cl){
+      var cd = byId(D.CLASSES, cl.classId);
+      var hasDiscs = (D.DISCIPLINES||[]).some(function(d){ return d.cls === cl.classId; });
+      if (hasDiscs && !cl.discId) add('discipline','medium','No discipline chosen for '+(cd?cd.name:cl.classId)+'.', { via:'forge', method:'chooseDisc', args:[cl.classId], options:A.recommendDisciplines(c, cl.classId).items.slice(0,6) });
+    });
+    var recAb = A.recommendAbilities(c, { limit:50 });
+    if (recAb.total > 0) add('abilities','low', recAb.total+' ability(ies) available to learn at your level.', { via:'forge', method:'learnAbility', options:recAb.items.slice(0,6) });
+    var recMag = A.recommendMagic(c, { limit:50 });
+    if (recMag.total > 0) add('magic','low', recMag.total+' spell(s)/magic available to learn.', { via:'forge', method:'learnSpell', options:recMag.items.slice(0,6) });
+    var prev = T(function(){ return E.levelUpPreview ? E.levelUpPreview(c) : (SM.forge && SM.forge.previewLevelUp ? SM.forge.previewLevelUp(c) : null); });
+    if (prev && (prev.canLevel || prev.available || prev.ok)) add('levelup','info','A level-up is available.', { via:'forge', method:'levelUp' });
+    return { character:c.id||null, issues:issues, total:issues.length, provider:'analysis' };
+  };
+
+  /* ---------------------------------------------------------------- plan ---
+   * Read-only level path via the Forge's own preview (no mutation).
+   */
+  function summarizePreview(p){
+    if (!p || typeof p!=='object') return null;
+    var keep = {};
+    ['level','nextLevel','hp','hpGain','resource','features','choices','abilities','xpNeeded','xpForNext','canLevel','ok'].forEach(function(k){ if (p[k]!=null) keep[k]=p[k]; });
+    return keep;
+  }
+  A.plan = function(c, targetLevel){
+    c = c || {};
+    var cur = c.totalLevel!=null ? c.totalLevel : AR(c.classes).reduce(function(a,x){ return a+(x.level||0); }, 0);
+    targetLevel = targetLevel || (cur+1);
+    var steps = [];
+    var prev = T(function(){ return (SM.forge && SM.forge.previewLevelUp) ? SM.forge.previewLevelUp(c) : (E.levelUpPreview ? E.levelUpPreview(c) : null); });
+    if (prev) steps.push({ level:cur+1, preview:summarizePreview(prev) });
+    return { from:cur, to:targetLevel, steps:steps, note:'Preview only — apply changes in the Character Forge.', provider:'analysis' };
+  };
+
+  /* ------------------------------------------------------------ suggest ---
+   * Deterministic starting build assembled from REAL kin/lineage/class/disc
+   * data. Always marked suggested. Registered as the SM.ai 'character' suggestor.
+   */
+  A.suggestBuild = function(ctx){
+    ctx = ctx || {};
+    var seed = 'build:' + (ctx.seed || ctx.name || ctx.concept || 'default');
+    var rnd  = (SM.ai && SM.ai.rng) ? SM.ai.rng(seed) : function(){ return 0; };
+    var classes = D.CLASSES || [];
+    var cls = ctx.classId ? byId(classes, ctx.classId) : classes[Math.floor(rnd()*classes.length) % classes.length];
+    cls = cls || classes[0] || { id:null, name:'(none)' };
+    var discs = (D.DISCIPLINES||[]).filter(function(d){ return d.cls === cls.id; });
+    var disc  = ctx.discId ? byId(discs, ctx.discId) : (discs.length ? discs[Math.floor(rnd()*discs.length) % discs.length] : null);
+    var kins  = D.KIN || [];
+    var kin   = ctx.kinId ? byId(kins, ctx.kinId) : kins[Math.floor(rnd()*kins.length) % kins.length];
+    kin = kin || kins[0] || { id:null, name:'(none)' };
+    var lineages = (D.LINEAGES||[]).filter(function(l){ return l.kin === kin.id; });
+    var lineage  = ctx.lineageId ? byId(lineages, ctx.lineageId) : (lineages.length ? lineages[Math.floor(rnd()*lineages.length) % lineages.length] : null);
+    var primary  = cls.primary || cls.attr || null;
+    var startMagic = A.recommendMagic({ classes:[{ classId:cls.id, level:1, discId:disc?disc.id:null }], spells:[] }, { limit:5 }).items;
+    var flavor = (SM.ai && SM.ai.narrate) ? SM.ai.narrate('npc', { name:(ctx.name||'This hero'), role:cls.name }).text : '';
+    var build = {
+      kind:'character-build',
+      concept: ctx.concept || null,
+      kin: { id:kin.id, name:kin.name },
+      lineage: lineage ? { id:lineage.id, name:lineage.name } : null,
+      class: { id:cls.id, name:cls.name, role:cls.role||null },
+      discipline: disc ? { id:disc.id, name:disc.name } : null,
+      primaryAttr: primary,
+      startingMagic: startMagic,
+      flavor: flavor,
+      note:'Suggested starting build assembled from existing kin, lineage, class, and discipline data. Create it in the Character Forge.'
+    };
+    return (SM.ai && SM.ai.mark) ? SM.ai.mark(build) : build;
+  };
+
+  /* ----------------------------------------------------------------- apply ---
+   * THE ONLY write path. Delegates to SM.forge.* — the Forge owns mutation.
+   * Default returns a handoff descriptor; opts.execute:true dispatches. Never
+   * mutates the character object directly; never uses eval/Function.
+   */
+  var FORGE_METHODS = { chooseDisc:1, addClass:1, learnAbility:1, learnSpell:1, editAttrs:1, setAttr:1, levelUp:1, confirmLevelUp:1, previewLevelUp:1, setLineage:1 };
+  A.apply = function(c, action, opts){
+    opts = opts || {}; action = action || {};
+    var m = action.method || action.type;
+    if (!m || !Object.prototype.hasOwnProperty.call(FORGE_METHODS, m)) return { ok:false, error:'unsupported-action:'+String(m) };
+    var handoff = { ok:true, via:'forge', method:m, args:action.args||[], note:'Character changes are applied through the Character Forge.' };
+    if (!opts.execute) return handoff;
+    if (!SM.forge || typeof SM.forge[m] !== 'function') return { ok:false, error:'forge-method-unavailable:'+m };
+    try {
+      handoff.result   = SM.forge[m].apply(SM.forge, [c].concat(action.args||[]));
+      handoff.executed = true;
+      return handoff;
+    } catch(e){ return { ok:false, error:String((e && e.message) || e), method:m }; }
+  };
+
+  // register the character-build suggestor with the AI adapter
+  if (SM.ai && SM.ai.registerSuggestor) SM.ai.registerSuggestor('character', A.suggestBuild);
+
+})();
+
+/* ===== PHASE 7 MODULE: mc_campaign.js ===== */
+/* ============================================================================
+ * mc_campaign.js  —  Phase 7C  —  AI GM / Campaign Builder (SM.campaign)
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads AFTER mc_search.js, mc_ai.js, mc_charassist.js.
+ *
+ * EXTENDS the existing campaign scaffolding — it does NOT replace it:
+ *   - persistence: reuses E.store.camps/upsertCamp/deleteCamp (NO second store).
+ *     Records stay compatible with the existing Campaigns screen / SM.camp
+ *     (same {id,name,gm,desc,chars,notes,created} fields) plus additive
+ *     {plan,theme,source,suggested} fields the old screen simply ignores.
+ *   - content: generated ONLY from real bestiary / encounters / NPCs / factions
+ *     / loot tables via existing accessors — every reference is a real record
+ *     id. It NEVER invents stats and NEVER presents output as official
+ *     (everything is marked suggested). Local-only. NOT multiplayer.
+ *   - No network or dynamic-code primitives (no fetch, XHR, socket streams, eval, Function).
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM === 'undefined' || !SM) return;
+  if (SM._mcCampaign_installed) return;
+  SM._mcCampaign_installed = true;
+
+  var E = SM.engine, D = SM.data;
+  var S = SM.campaign = SM.campaign || {};
+  S.version = '7C.1';
+  S._seq = 0;
+
+  function T(fn, dflt){ try { return fn(); } catch(e){ return dflt===undefined?null:dflt; } }
+  function sample(arr, n, seed){ return (SM.ai && SM.ai.sample) ? SM.ai.sample(arr, n, seed) : (arr||[]).slice(0, n); }
+  function pickOne(arr, seed){ if (!arr || !arr.length) return null; var s = sample(arr, 1, seed); return s[0] || arr[0]; }
+  function refOf(rec, type){ return rec ? { id:rec.id, type:type, name:rec.name } : null; }
+
+  /* ------------------------------------------------- real content sources ---
+   * Prefer merged accessors; fall back to base arrays. All real records.
+   */
+  function creaturesAll(){ var r = T(function(){ return SM.bestiary && SM.bestiary.all ? SM.bestiary.all() : null; }); return (Array.isArray(r)&&r.length)?r:(D.BESTIARY||[]); }
+  function bossCreatures(){ var r = T(function(){ return SM.bestiary && SM.bestiary.byBucket ? SM.bestiary.byBucket('boss') : null; }); return (Array.isArray(r)&&r.length)?r:creaturesAll(); }
+  function encountersAll(){ var r = T(function(){ return SM.encounter && SM.encounter.all ? SM.encounter.all() : null; }); return (Array.isArray(r)&&r.length)?r:(D.ENCOUNTERS||[]); }
+  function npcsAll(){ var r = T(function(){ return SM.lib && SM.lib.arr ? SM.lib.arr('npc') : null; }); return (Array.isArray(r)&&r.length)?r:(D.NPCS||[]); }
+  function factionsAll(){ var r = T(function(){ return SM.lib && SM.lib.arr ? SM.lib.arr('faction') : null; }); return (Array.isArray(r)&&r.length)?r:(D.FACTIONS||[]); }
+  function lootAll(){ var r = T(function(){ return SM.lib && SM.lib.arr ? SM.lib.arr('loot') : null; }); return (Array.isArray(r)&&r.length)?r:(D.LOOT||[]); }
+
+  /* ---------------------------------------------------------- templates ---
+   * Deterministic campaign scaffolds. Structure only — content is filled from
+   * real data at generation time.
+   */
+  var TEMPLATES = {
+    'dragon-hunt':  { name:'Dragon Hunt',           acts:['The Rumor','The Trail','The Lair'],                 bossCategory:'Dragon' },
+    'faction-war':  { name:'Faction War',           acts:['Rising Tension','Open Conflict','The Reckoning'],   bossCategory:null },
+    'dungeon-crawl':{ name:'Dungeon Crawl',         acts:['The Threshold','The Depths','The Heart'],           bossCategory:null },
+    'mystery':      { name:'Mystery',               acts:['The Incident','The Investigation','The Truth'],     bossCategory:null },
+    'wilderness':   { name:'Wilderness Expedition', acts:['Into the Wild','The Deep Wilds','The Far Reach'],   bossCategory:null }
+  };
+  S.templates = function(){ return Object.keys(TEMPLATES).map(function(id){ return { id:id, name:TEMPLATES[id].name, acts:TEMPLATES[id].acts.slice() }; }); };
+  S._pickTheme = function(seed){ var ids = Object.keys(TEMPLATES); return sample(ids, 1, seed+':theme')[0] || ids[0]; };
+
+  /* --------------------------------------------------------- generate ---
+   * Deterministic campaign PLAN assembled from real records. Marked suggested.
+   */
+  S.generate = function(opts){
+    opts = opts || {};
+    var seed  = 'camp:' + (opts.seed || opts.name || opts.theme || 'default');
+    var tmplId = (opts.theme && TEMPLATES[opts.theme]) ? opts.theme : S._pickTheme(seed);
+    var tmpl  = TEMPLATES[tmplId];
+
+    var creatures = creaturesAll();
+    var encs = encountersAll();
+    if (opts.environment){
+      var eEnv = T(function(){ return SM.encounter && SM.encounter.byEnvironment ? SM.encounter.byEnvironment(opts.environment) : null; });
+      if (Array.isArray(eEnv) && eEnv.length) encs = eEnv;
+      var cEnv = T(function(){ return SM.bestiary && SM.bestiary.byEnvironment ? SM.bestiary.byEnvironment(opts.environment) : null; });
+      if (Array.isArray(cEnv) && cEnv.length) creatures = cEnv;
+    }
+    var bosses = bossCreatures();
+    if (tmpl.bossCategory){
+      var byCat = T(function(){ return SM.bestiary && SM.bestiary.byCategory ? SM.bestiary.byCategory(tmpl.bossCategory) : null; });
+      if (Array.isArray(byCat) && byCat.length) bosses = byCat;
+    }
+    var villain     = pickOne(bosses.length ? bosses : creatures, seed+':villain');
+    var npcs        = npcsAll();
+    var questGiver  = pickOne(npcs, seed+':qg');
+    var factions    = sample(factionsAll(), 2, seed+':fac');
+    var lootTables  = sample(lootAll(), 3, seed+':loot');
+
+    var acts = tmpl.acts.map(function(actName, i){
+      var actSeed = seed + ':act' + i;
+      var actEncs = sample(encs, 2, actSeed+':e');
+      var actMobs = sample(creatures, 3, actSeed+':m');
+      var actNpc  = pickOne(npcs, actSeed+':n');
+      var loc = (SM.ai && SM.ai.narrate) ? SM.ai.narrate('location', { name:actName }).text : '';
+      return {
+        name: actName,
+        summary: loc,
+        encounters: actEncs.map(function(e){ return refOf(e,'encounter'); }).filter(Boolean),
+        creatures:  actMobs.map(function(m){ return refOf(m,'creature'); }).filter(Boolean),
+        npc: refOf(actNpc,'npc'),
+        beats: []
+      };
+    });
+
+    var title   = opts.name || (tmpl.name + ': ' + (villain ? villain.name : 'The Unknown'));
+    var premise = (SM.ai && SM.ai.narrate) ? SM.ai.narrate('campaign', { name:title }).text : '';
+    var plan = {
+      kind:'campaign-plan', theme:tmplId, themeName:tmpl.name, title:title, premise:premise,
+      tier: opts.tier || null, environment: opts.environment || null,
+      questGiver: refOf(questGiver,'npc'),
+      villain:    refOf(villain,'creature'),
+      factions:   factions.map(function(f){ return refOf(f,'faction'); }).filter(Boolean),
+      lootTables: lootTables.map(function(l){ return refOf(l,'loot'); }).filter(Boolean),
+      acts: acts
+    };
+    return (SM.ai && SM.ai.mark) ? SM.ai.mark(plan) : plan;
+  };
+
+  /* ------------------------------------------------ data-layer CRUD ---
+   * Delegates to the EXISTING E.store campaign persistence. No second store.
+   */
+  S.list   = function(){ return T(function(){ return E.store.camps(); }, []) || []; };
+  S.get    = function(id){ return S.list().filter(function(c){ return c && c.id===id; })[0] || null; };
+  S.save   = function(camp){ if (!camp || !camp.id) return null; camp.updated = Date.now(); return T(function(){ return E.store.upsertCamp(camp); }); };
+  S.remove = function(id){ return T(function(){ return E.store.deleteCamp(id); }); };
+
+  S.createFromGeneration = function(opts){
+    opts = opts || {};
+    var plan = S.generate(opts);
+    var rnd  = (SM.ai && SM.ai.rng) ? SM.ai.rng('id:' + (opts.seed||plan.title) + ':' + (S._seq++)) : function(){ return Math.random(); };
+    var id   = opts.id || ('camp-' + Date.now().toString(36) + '-' + Math.floor(rnd()*1e9).toString(36));
+    var camp = {
+      id:id, name:plan.title, gm:opts.gm||'', desc:plan.premise,
+      chars:(opts.party||[]).slice(), notes:[], created:Date.now(), updated:Date.now(),
+      source:'7C', suggested:true, theme:plan.theme, plan:plan
+    };
+    S.save(camp);
+    return camp;
+  };
+
+  /* ------------------------------------------------------------- editing ---
+   * All edits mutate the stored record and persist via save(). Additive.
+   */
+  S.rename     = function(id, name){ var c=S.get(id); if(!c) return null; c.name=name; return S.save(c); };
+  S.setPremise = function(id, text){ var c=S.get(id); if(!c) return null; c.desc=text; if(c.plan) c.plan.premise=text; return S.save(c); };
+  S.addNote    = function(id, text){ var c=S.get(id); if(!c || !text) return null; c.notes=c.notes||[]; c.notes.unshift(new Date().toLocaleDateString()+': '+text); return S.save(c); };
+  S.addChar    = function(id, charId){ var c=S.get(id); if(!c) return null; c.chars=c.chars||[]; if(c.chars.indexOf(charId)<0) c.chars.push(charId); return S.save(c); };
+  S.removeChar = function(id, charId){ var c=S.get(id); if(!c) return null; c.chars=(c.chars||[]).filter(function(x){ return x!==charId; }); return S.save(c); };
+  S.addBeat    = function(id, actIndex, beat){ var c=S.get(id); if(!c||!c.plan||!c.plan.acts||!c.plan.acts[actIndex]) return null; var a=c.plan.acts[actIndex]; a.beats=a.beats||[]; a.beats.push(beat); return S.save(c); };
+  S.attach     = function(id, ref){ var c=S.get(id); if(!c||!ref||!ref.id) return null; c.plan=c.plan||{}; c.plan.extra=c.plan.extra||[]; c.plan.extra.push({ id:ref.id, type:ref.type||null, name:ref.name||ref.id }); return S.save(c); };
+  S.regenerateAct = function(id, actIndex, opts){
+    var c=S.get(id); if(!c||!c.plan||!c.plan.acts||!c.plan.acts[actIndex]) return null;
+    var gOpts = { theme:c.theme, tier:c.plan.tier, environment:c.plan.environment, seed:(opts&&opts.seed) || ('regen:'+id+':'+actIndex+':'+Date.now()) };
+    var fresh = S.generate(gOpts);
+    var newAct = fresh.acts[actIndex % fresh.acts.length];
+    if (newAct){ newAct.name = c.plan.acts[actIndex].name; c.plan.acts[actIndex] = newAct; }
+    return S.save(c);
+  };
+
+  // register the campaign generator with the AI adapter
+  if (SM.ai && SM.ai.registerSuggestor) SM.ai.registerSuggestor('campaign', function(ctx){ return S.generate(ctx); });
+
+})();
+
+/* ===== PHASE 7 MODULE: mc_7ui.js ===== */
+/* ============================================================================
+ * mc_7ui.js  —  Phase 7-UI  —  Screens + nav for Search / Assistant / Builder
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads LAST (after search/ai/charassist/campaign).
+ *
+ * Adds four screens (all pure string renderers, never throw — the string-return
+ * contracts J15 / VF28 / G10 call every SM.screens.* with no args):
+ *   - search    : Smart Search over SM.search, result cards, cross-links
+ *   - assistant : Character Assistant (SM.charassist) — read-only, Forge handoff
+ *   - builder   : AI Campaign Builder (SM.campaign) — templates, generate, edit
+ *   - detail    : content detail with breadcrumbs + related cross-links
+ * Nav is DECORATED (not overwritten), mirroring the master-expansion pattern
+ * (guard flags, append-if-absent). SM.screens count contract is `>=39`, so
+ * adding screens is safe. No fetch / eval / Function.
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM === 'undefined' || !SM) return;
+  if (SM._mc7ui_installed) return;
+  SM._mc7ui_installed = true;
+
+  var U = SM.ui, E = SM.engine, D = SM.data;
+  if (!U) return;
+  var hasDoc = (typeof document !== 'undefined' && document && typeof document.getElementById === 'function');
+  function esc(s){ return U.esc ? U.esc(s) : String(s==null?'':s); }
+  function T(fn, d){ try { return fn(); } catch(e){ return d===undefined?null:d; } }
+  function jarg(s){ return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  function activeChar(){ return T(function(){ return SM.act && SM.act.get ? SM.act.get() : null; }) || T(function(){ return E.store && E.store.activeChar ? E.store.activeChar() : null; }); }
+
+  var TYPE_ICON = { kin:'🧬', lineage:'🌿', class:'🎖️', discipline:'📕', ability:'✨', spell:'🔮', magic:'🪄',
+    item:'🗡️', creature:'🐉', npc:'🧑', faction:'🏳️', encounter:'⚔️', recipe:'⚗️', loot:'💰', condition:'☠️' };
+  function icon(t){ return TYPE_ICON[t] || '📄'; }
+
+  /* ------------------------------------------------------- NAV titles ---
+   * No NAV key-count contract exists; adding titles is safe and improves UX.
+   */
+  if (U.NAV){
+    if (!U.NAV.search)    U.NAV.search    = { t:'Smart Search',        i:'🔍' };
+    if (!U.NAV.assistant) U.NAV.assistant = { t:'Character Assistant', i:'🧙' };
+    if (!U.NAV.builder)   U.NAV.builder   = { t:'Campaign Builder',    i:'🏗️' };
+    if (!U.NAV.detail)    U.NAV.detail    = { t:'Details',             i:'📄' };
+  }
+
+  /* ------------------------------------------------ UI action helpers ---
+   * Invoked from onclick handlers. Kept off the render path.
+   */
+  var X = SM.ui7 = SM.ui7 || {};
+  X.searchGo   = function(v){ T(function(){ U.go('search', { q:v }); }); };
+  X.open       = function(type,id){ T(function(){ U.go('detail', { type:type, id:id }); }); };
+  X.createCampaign = function(theme){ T(function(){ var c = SM.campaign.createFromGeneration({ theme:theme }); if (U.toast) U.toast('Suggested campaign created.','ok'); U.go('builder', { opened:c.id }); }); };
+  X.openCampaign   = function(id){ T(function(){ U.go('builder', { opened:id }); }); };
+  X.regenAct       = function(id,idx){ T(function(){ SM.campaign.regenerateAct(id, idx); U.go('builder', { opened:id }); }); };
+  X.deleteCampaign = function(id){ T(function(){ if (typeof confirm==='function' && !confirm('Delete this campaign?')) return; SM.campaign.remove(id); U.go('builder', {}); }); };
+  X.rerollBuild    = function(){ T(function(){ U.go('assistant', { buildSeed:'b'+Date.now().toString(36) }); }); };
+
+  /* --------------------------------------------------------- helpers ---*/
+  function suggestedBadge(){ return '<span class="tag" title="Assembled offline from existing data — review before use">Suggested</span>'; }
+  function resultRow(r){
+    var tags = [];
+    if (r.element) tags.push(esc(r.element));
+    if (r.rarity)  tags.push(esc(r.rarity));
+    if (r.tier != null) tags.push('T'+esc(r.tier));
+    var tagHtml = tags.map(function(t){ return '<span class="tag">'+t+'</span>'; }).join(' ');
+    return '<div class="li" onclick="SM.ui7.open(\''+jarg(r.type)+'\',\''+jarg(r.id)+'\')">'+
+      '<div class="ava">'+icon(r.type)+'</div>'+
+      '<div class="meta"><div class="t">'+esc(r.name)+' '+tagHtml+'</div>'+
+      '<div class="s">'+esc(r.type)+'</div></div></div>';
+  }
+  function refCardMini(ref){
+    if (!ref || !ref.id) return '';
+    return '<div class="li" onclick="SM.ui7.open(\''+jarg(ref.type)+'\',\''+jarg(ref.id)+'\')">'+
+      '<div class="ava">'+icon(ref.type)+'</div>'+
+      '<div class="meta"><div class="t">'+esc(ref.name)+'</div><div class="s">'+esc(ref.type||'')+'</div></div></div>';
+  }
+  function crumbs(parts){
+    return '<div class="small muted" style="margin-bottom:8px">'+parts.map(function(p,i){
+      var sep = i>0 ? ' &rsaquo; ' : '';
+      if (p.onclick) return sep+'<a href="javascript:void(0)" onclick="'+p.onclick+'" style="color:inherit;text-decoration:underline">'+esc(p.label)+'</a>';
+      return sep+esc(p.label);
+    }).join('')+'</div>';
+  }
+
+  /* ============================== SEARCH ============================== */
+  SM.screens.search = function(p){
+    p = p || {};
+    try {
+      var q = p.q || '';
+      var head = '<div class="panel"><div class="eyebrow">Smart Search</div>'+
+        '<p class="small muted" style="margin-top:6px">Search everything at once — kin, lineages, classes, disciplines, abilities, magic, items, creatures, NPCs, factions and encounters. Natural queries work: try "storm dragons", "fire spells for Mystic", or "legendary two-handed weapons".</p>'+
+        '<label class="fld" style="margin-top:10px"><span>Search</span>'+
+        '<input id="mc7q" type="text" value="'+esc(q)+'" onchange="SM.ui7.searchGo(this.value)" placeholder="Search StormMythic..."></label></div>';
+      var ex = ['storm dragons','fire spells for Mystic','legendary items','two-handed weapons','wolfkin lineages','boss creatures'];
+      var chips = '<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:10px">'+ex.map(function(e){
+        return '<button class="btn sm" onclick="SM.ui7.searchGo(\''+jarg(e)+'\')">'+esc(e)+'</button>'; }).join('')+'</div>';
+      if (!q) return head+chips+'<div class="panel" style="margin-top:12px"><p class="small muted">Enter a query above to begin. Results are read-only.</p></div>';
+      var res = SM.search.query(q, { limit:40 });
+      var items = res.items || [];
+      var body;
+      if (!items.length){
+        body = '<div class="panel" style="margin-top:12px"><p class="small muted">No matches for "'+esc(q)+'". Try a broader term or a type like item, magic, creature, kin, class.</p></div>';
+      } else {
+        var itype = res.intent && res.intent.type ? '<span class="tag">'+esc(res.intent.type)+'</span>' : '';
+        body = '<div class="panel" style="margin-top:12px"><div class="row between"><span class="eyebrow">'+res.total+' result'+(res.total===1?'':'s')+'</span>'+itype+'</div>'+
+          '<div class="list" style="margin-top:8px">'+items.map(resultRow).join('')+'</div></div>';
+      }
+      return head+chips+body;
+    } catch(e){
+      return '<div class="panel"><div class="eyebrow">Smart Search</div><p class="small muted">Search is temporarily unavailable.</p></div>';
+    }
+  };
+
+  /* ============================ ASSISTANT ============================ */
+  SM.screens.assistant = function(p){
+    p = p || {};
+    try {
+      var c = activeChar();
+      if (!c){
+        return '<div class="panel"><div class="eyebrow">Character Assistant</div>'+
+          '<p class="small muted" style="margin-top:6px">The assistant analyzes your active hero and suggests eligible abilities, magic, equipment and next steps — all applied through the Character Forge. Create or select a character to begin.</p>'+
+          '<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">'+
+          '<button class="btn primary sm" onclick="SM.ui.go(\'creator\')">Create Character</button>'+
+          '<button class="btn sm" onclick="SM.ui.go(\'selection\')">Choose Character</button></div>'+
+          '<div style="margin-top:12px" class="small muted">You can also generate a suggested starting build below.</div>'+
+          suggestBuildPanel(p)+'</div>';
+      }
+      var cx = SM.charassist.context(c);
+      var an = SM.charassist.analyze(c);
+      var head = '<div class="panel"><div class="eyebrow">Character Assistant</div>'+
+        '<div class="row between" style="margin-top:6px"><div><div class="t" style="font-weight:600">'+esc(cx.name)+'</div>'+
+        '<div class="s small muted">'+esc(cx.kinName||'—')+(cx.lineageName?(' · '+esc(cx.lineageName)):'')+' · '+cx.classes.map(function(cl){ return esc(cl.className)+' '+cl.level+(cl.discName?(' ('+esc(cl.discName)+')'):''); }).join(', ')+' · Level '+cx.totalLevel+'</div></div>'+
+        '<button class="btn sm primary" onclick="SM.ui.go(\'forge\')">Open Forge</button></div>'+
+        '<p class="small muted" style="margin-top:8px">Recommendations are read-only. Use the Character Forge to apply any change.</p></div>';
+
+      var issues = an.issues.length ? '<div class="panel" style="margin-top:12px"><div class="eyebrow">Suggested Next Steps</div><div class="list" style="margin-top:8px">'+
+        an.issues.map(function(is){
+          return '<div class="li"><div class="ava">'+(is.severity==='high'?'❗':is.severity==='medium'?'▲':'•')+'</div>'+
+            '<div class="meta"><div class="t">'+esc(is.msg)+'</div><div class="s">'+esc((is.action&&is.action.via)?('via '+is.action.via):'informational')+'</div></div></div>';
+        }).join('')+'</div></div>' : '';
+
+      var secs = '';
+      secs += recSection('Disciplines', firstDisciplineRecs(c));
+      secs += recSection('Abilities you can learn', SM.charassist.recommendAbilities(c, { limit:8 }).items);
+      secs += recSection('Magic you can learn', SM.charassist.recommendMagic(c, { limit:8 }).items);
+      secs += recSection('Equipment you can equip', SM.charassist.recommendEquipment(c, { limit:8 }).items);
+      if (!cx.lineageName) secs += recSection('Lineages for your kin', SM.charassist.recommendLineages(c).items.slice(0,8));
+
+      return head + issues + secs + '<div class="panel" style="margin-top:12px"><p class="small muted">All changes are made in the <a href="javascript:void(0)" onclick="SM.ui.go(\'forge\')" style="color:inherit;text-decoration:underline">Character Forge</a> — the assistant never edits your character directly.</p></div>';
+    } catch(e){
+      return '<div class="panel"><div class="eyebrow">Character Assistant</div><p class="small muted">The assistant is temporarily unavailable.</p></div>';
+    }
+  };
+  function firstDisciplineRecs(c){
+    var out = [];
+    (c.classes||[]).forEach(function(cl){
+      if (!cl.discId){ var r = SM.charassist.recommendDisciplines(c, cl.classId); out = out.concat(r.items.slice(0,4)); }
+    });
+    return out;
+  }
+  function recSection(title, items){
+    items = items || [];
+    if (!items.length) return '';
+    return '<div class="panel" style="margin-top:12px"><div class="eyebrow">'+esc(title)+'</div>'+
+      '<div class="list" style="margin-top:8px">'+items.map(refCardMini).join('')+'</div></div>';
+  }
+  function suggestBuildPanel(p){
+    var seed = (p && p.buildSeed) || 'default';
+    var b = T(function(){ return SM.ai && SM.ai.suggest ? SM.ai.suggest('character', { seed:seed }) : null; });
+    if (!b || b.error) return '';
+    var mag = (b.startingMagic||[]).map(function(m){ return refCardMini(m); }).join('');
+    return '<div class="panel" style="margin-top:12px"><div class="row between"><div class="eyebrow">Suggested Starting Build '+suggestedBadge()+'</div>'+
+      '<button class="btn sm" onclick="SM.ui7.rerollBuild()">Reroll</button></div>'+
+      '<div class="kv" style="margin-top:8px"><span class="k">Kin</span><span class="v">'+esc(b.kin&&b.kin.name)+'</span></div>'+
+      (b.lineage?'<div class="kv"><span class="k">Lineage</span><span class="v">'+esc(b.lineage.name)+'</span></div>':'')+
+      '<div class="kv"><span class="k">Class</span><span class="v">'+esc(b.class&&b.class.name)+(b.class&&b.class.role?(' · '+esc(b.class.role)):'')+'</span></div>'+
+      (b.discipline?'<div class="kv"><span class="k">Discipline</span><span class="v">'+esc(b.discipline.name)+'</span></div>':'')+
+      (b.primaryAttr?'<div class="kv"><span class="k">Focus</span><span class="v">'+esc(b.primaryAttr)+'</span></div>':'')+
+      (mag?'<div class="eyebrow" style="margin-top:8px">Opening magic</div><div class="list" style="margin-top:6px">'+mag+'</div>':'')+
+      (b.flavor?'<p class="small muted" style="margin-top:8px">'+esc(b.flavor)+'</p>':'')+
+      '<p class="small muted" style="margin-top:6px">'+esc(b.disclaimer||'')+'</p></div>';
+  }
+
+  /* ============================= BUILDER ============================= */
+  SM.screens.builder = function(p){
+    p = p || {};
+    try {
+      if (p.opened){
+        var c = SM.campaign.get(p.opened);
+        if (c) return campaignDetail(c);
+      }
+      var tpls = SM.campaign.templates();
+      var tHtml = '<div class="panel"><div class="eyebrow">AI Campaign Builder</div>'+
+        '<p class="small muted" style="margin-top:6px">Generate a full campaign scaffold from existing creatures, encounters, NPCs, factions and loot. Everything is a suggestion assembled offline — review and edit before you run it. Campaigns are saved locally alongside your existing ones.</p>'+
+        '<div class="grid cols2" style="margin-top:12px">'+tpls.map(function(t){
+          return '<div class="card"><div class="row between"><div class="meta"><div class="t">'+esc(t.name)+'</div><div class="s">'+t.acts.length+' acts: '+esc(t.acts.join(' · '))+'</div></div></div>'+
+            '<button class="btn sm primary block" style="margin-top:8px" onclick="SM.ui7.createCampaign(\''+jarg(t.id)+'\')">Generate</button></div>';
+        }).join('')+'</div></div>';
+      var camps = SM.campaign.list();
+      var cHtml = '<div class="panel" style="margin-top:12px"><div class="eyebrow">Your Campaigns</div>'+
+        (camps.length ? '<div class="list" style="margin-top:8px">'+camps.map(function(c){
+          return '<div class="li" onclick="SM.ui7.openCampaign(\''+jarg(c.id)+'\')"><div class="ava">🏰</div>'+
+            '<div class="meta"><div class="t">'+esc(c.name)+' '+(c.source==='7C'?suggestedBadge():'')+'</div>'+
+            '<div class="s">'+esc(c.theme||'custom')+' · '+((c.chars||[]).length)+' hero(es)</div></div></div>';
+        }).join('')+'</div>' : '<p class="small muted" style="margin-top:8px">No campaigns yet. Generate one above, or create one from GM Tools.</p>')+'</div>';
+      return tHtml + cHtml;
+    } catch(e){
+      return '<div class="panel"><div class="eyebrow">AI Campaign Builder</div><p class="small muted">The campaign builder is temporarily unavailable.</p></div>';
+    }
+  };
+  function campaignDetail(c){
+    var plan = c.plan || {};
+    var acts = (plan.acts||[]).map(function(a, i){
+      var encs = (a.encounters||[]).map(refCardMini).join('');
+      var mobs = (a.creatures||[]).map(refCardMini).join('');
+      var npc  = a.npc ? refCardMini(a.npc) : '';
+      var beats = (a.beats||[]).map(function(b){ return '<div class="le small">'+esc(b.text||JSON.stringify(b))+'</div>'; }).join('');
+      return '<div class="panel" style="margin-top:10px"><div class="row between"><div class="eyebrow">Act '+(i+1)+': '+esc(a.name)+'</div>'+
+        '<button class="btn sm" onclick="SM.ui7.regenAct(\''+jarg(c.id)+'\','+i+')">Reroll act</button></div>'+
+        (a.summary?'<p class="small muted" style="margin-top:6px">'+esc(a.summary)+'</p>':'')+
+        (npc?'<div class="eyebrow" style="margin-top:8px">Key NPC</div><div class="list" style="margin-top:6px">'+npc+'</div>':'')+
+        (encs?'<div class="eyebrow" style="margin-top:8px">Encounters</div><div class="list" style="margin-top:6px">'+encs+'</div>':'')+
+        (mobs?'<div class="eyebrow" style="margin-top:8px">Creatures</div><div class="list" style="margin-top:6px">'+mobs+'</div>':'')+
+        (beats?'<div class="eyebrow" style="margin-top:8px">Notes</div><div class="log" style="margin-top:6px">'+beats+'</div>':'')+
+        '</div>';
+    }).join('');
+    var head = crumbs([{ label:'Campaign Builder', onclick:"SM.ui.go('builder',{})" }, { label:c.name }]) +
+      '<div class="panel"><div class="row between"><div class="eyebrow">'+esc(c.name)+' '+(c.source==='7C'?suggestedBadge():'')+'</div>'+
+      '<button class="btn sm danger" onclick="SM.ui7.deleteCampaign(\''+jarg(c.id)+'\')">Delete</button></div>'+
+      (c.desc?'<p class="small muted" style="margin-top:6px">'+esc(c.desc)+'</p>':'')+
+      (plan.villain?'<div class="kv" style="margin-top:8px"><span class="k">Villain</span><span class="v"><a href="javascript:void(0)" onclick="SM.ui7.open(\''+jarg(plan.villain.type)+'\',\''+jarg(plan.villain.id)+'\')" style="color:inherit;text-decoration:underline">'+esc(plan.villain.name)+'</a></span></div>':'')+
+      (plan.questGiver?'<div class="kv"><span class="k">Quest Giver</span><span class="v"><a href="javascript:void(0)" onclick="SM.ui7.open(\''+jarg(plan.questGiver.type)+'\',\''+jarg(plan.questGiver.id)+'\')" style="color:inherit;text-decoration:underline">'+esc(plan.questGiver.name)+'</a></span></div>':'')+
+      ((plan.factions&&plan.factions.length)?'<div class="eyebrow" style="margin-top:8px">Factions</div><div class="list" style="margin-top:6px">'+plan.factions.map(refCardMini).join('')+'</div>':'')+
+      ((plan.lootTables&&plan.lootTables.length)?'<div class="eyebrow" style="margin-top:8px">Loot Tables</div><div class="list" style="margin-top:6px">'+plan.lootTables.map(refCardMini).join('')+'</div>':'')+
+      (c.suggested?'<p class="small muted" style="margin-top:8px">'+esc(c.plan&&c.plan.disclaimer||'Suggested content — review before use.')+'</p>':'')+
+      '</div>';
+    return head + acts;
+  }
+
+  /* ============================== DETAIL ============================= */
+  SM.screens.detail = function(p){
+    p = p || {};
+    try {
+      var id = p.id, type = p.type;
+      if (!id) return '<div class="panel"><div class="eyebrow">Details</div><p class="small muted" style="margin-top:6px">Select an item from <a href="javascript:void(0)" onclick="SM.ui.go(\'search\')" style="color:inherit;text-decoration:underline">Smart Search</a> to see its details.</p></div>';
+      var r = SM.search.resolve(id, type) || SM.search.resolve(id);
+      if (!r) return crumbs([{ label:'Search', onclick:"SM.ui.go('search')" }, { label:'Not found' }]) + '<div class="panel"><p class="small muted">That entry could not be found.</p></div>';
+      var head = crumbs([{ label:'Search', onclick:"SM.ui.go('search')" }, { label:r.type, onclick:"SM.ui7.searchGo('"+jarg(r.type)+"')" }, { label:r.name }]);
+      var fields = [];
+      ['element','rarity','tier','level','role','cls','kin','disc','category','cat','action','range','target'].forEach(function(k){
+        if (r[k]!=null && typeof r[k]!=='object') fields.push('<div class="kv"><span class="k">'+esc(k)+'</span><span class="v">'+esc(r[k])+'</span></div>');
+      });
+      var descTxt = r.desc || r.lore || r.text || '';
+      var panel = '<div class="panel"><div class="row between"><div class="eyebrow">'+icon(r.type)+' '+esc(r.name)+'</div><span class="tag">'+esc(r.type)+'</span></div>'+
+        (fields.length?'<div style="margin-top:8px">'+fields.join('')+'</div>':'')+
+        (descTxt?'<p class="small muted" style="margin-top:8px">'+esc(descTxt)+'</p>':'')+'</div>';
+      var rel = T(function(){ return SM.search.related ? SM.search.related(id, r.type) : null; }) || [];
+      var relList = (rel.items || rel || []);
+      var relHtml = (relList && relList.length) ? '<div class="panel" style="margin-top:12px"><div class="eyebrow">Related</div><div class="list" style="margin-top:8px">'+relList.slice(0,10).map(refCardMini).join('')+'</div></div>' : '';
+      return head + panel + relHtml;
+    } catch(e){
+      return '<div class="panel"><div class="eyebrow">Details</div><p class="small muted">This entry is temporarily unavailable.</p></div>';
+    }
+  };
+
+  /* ============================= NAV DECORATION ============================= */
+  if (typeof U.buildNav === 'function' && !U._mc7Nav){
+    var _bn = U.buildNav; U._mc7Nav = true;
+    U.buildNav = function(){
+      _bn.apply(this, arguments);
+      try {
+        var el = hasDoc ? document.getElementById('sidenav') : null;
+        if (el && String(el.innerHTML).indexOf('data-nav="search"') < 0){
+          var links = [['search','🔍','Smart Search'],['assistant','🧙','Character Assistant'],['builder','🏗️','Campaign Builder']].map(function(a){
+            return '<div class="navlink" data-nav="'+a[0]+'" onclick="SM.ui.go(\''+a[0]+'\')"><span class="ic">'+a[1]+'</span> '+a[2]+'</div>';
+          }).join('');
+          el.innerHTML += '<div class="navgroup">Discovery &amp; AI</div>'+links;
+        }
+      } catch(e){}
+      try { if (U.syncNav) U.syncNav(); } catch(e){}
+    };
+  }
+  if (typeof U.openMore === 'function' && !U._mc7More){
+    var _more = U.openMore; U._mc7More = true;
+    U.openMore = function(){
+      _more.apply(this, arguments);
+      try {
+        var b = hasDoc ? document.getElementById('modalBody') : null;
+        if (b && String(b.innerHTML).indexOf("go('search')") < 0){
+          var extra = [['search','🔍','Search'],['assistant','🧙','Assistant'],['builder','🏗️','Campaigns AI']].map(function(a){
+            return '<div class="card" style="text-align:center" onclick="SM.ui.closeModal();SM.ui.go(\''+a[0]+'\')"><div style="font-size:1.6rem">'+a[1]+'</div><div class="small" style="margin-top:6px">'+a[2]+'</div></div>';
+          }).join('');
+          b.innerHTML += '<div class="grid cols" style="margin-top:10px">'+extra+'</div>';
+        }
+      } catch(e){}
+    };
+  }
+
+})();
+
 </script>
 </body>
 </html>
