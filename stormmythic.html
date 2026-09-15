@@ -10792,6 +10792,920 @@ D.SHOPS=[{"id":"shop-haventide-general","name":"Haventide General Goods","npcId"
 
 })();
 
+
+;
+
+/* ==== mc_campaignws.js (Phase 7D/7E/7F) ==== */
+/* ============================================================================
+ * mc_campaignws.js  —  Phase 7D  —  Campaign Workspace & Management (SM.campaignws)
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads AFTER the Phase 7A-7C modules.
+ *
+ * EXTENDS the existing campaign system (SM.campaign / E.store) — does NOT replace
+ * it. Workspace data is nested under camp.ws (sessions/quests/locations/npcs/
+ * factions/encounters/notes/status), added lazily so PRE-7D records keep loading.
+ * Persistence reuses E.store.upsertCamp (no second store). Encounters launch via
+ * the authoritative SM.combat/SM.cbt engine (never a second combat engine).
+ * Reward/loot uses SM.rewards; quest completion is idempotent (never double-grants).
+ * Campaign search MERGES with SM.search (the core index is left untouched).
+ * No eval / Function / network.
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM === 'undefined' || !SM) return;
+  if (SM._mcCampaignws_installed) return;
+  SM._mcCampaignws_installed = true;
+
+  var E = SM.engine, D = SM.data;
+  var W = SM.campaignws = SM.campaignws || {};
+  W.version = '7D.1';
+
+  function T(fn, d){ try { return fn(); } catch(e){ return d===undefined?null:d; } }
+  function isArr(x){ return Array.isArray(x); }
+  function AR(x){ return isArr(x) ? x : []; }
+  function str(x){ return (x==null) ? '' : String(x); }
+  function clamp(n, lo, hi){ n = +n; if (isNaN(n)) n = 0; return Math.max(lo, Math.min(hi, n)); }
+  function hash(s){ return (SM.ai && SM.ai.hash) ? SM.ai.hash(s) : (function(){ var h=0,i; s=String(s); for(i=0;i<s.length;i++){ h=(Math.imul(31,h)+s.charCodeAt(i))|0; } return h>>>0; })(); }
+
+  /* ------------------------------------------------ workspace container ---
+   * camp.ws holds all 7D data. Added only on write (old records untouched on read).
+   */
+  function defaultWs(){ return { _seq:0, status:'active', flags:{}, sessions:[], quests:[], locations:[], npcs:[], factions:[], encounters:[], notes:[], created:Date.now(), updated:Date.now() }; }
+  function ws(camp){ // read-safe view (does not persist)
+    if (!camp || typeof camp!=='object') return defaultWs();
+    var w = camp.ws;
+    if (!w || typeof w!=='object') return defaultWs();
+    // tolerate malformed fields
+    ['sessions','quests','locations','npcs','factions','encounters','notes'].forEach(function(k){ if(!isArr(w[k])) w[k]=[]; });
+    if (typeof w.flags!=='object'||!w.flags) w.flags={};
+    if (w._seq==null) w._seq=0;
+    if (!w.status) w.status='active';
+    return w;
+  }
+  function ensureWs(camp){ if (!camp.ws || typeof camp.ws!=='object') camp.ws = defaultWs(); return ws(camp); }
+  function get(campId){ return T(function(){ return SM.campaign.get(campId); }); }
+  function save(camp){ if (!camp || !camp.id) return null; if (camp.ws) camp.ws.updated = Date.now(); camp.updated = Date.now(); return T(function(){ return E.store.upsertCamp(camp); }); }
+  function mkId(camp, kind){ var w = ensureWs(camp); w._seq = (w._seq||0) + 1; return kind + '-' + hash(camp.id + ':' + kind + ':' + w._seq).toString(36); }
+  function find(list, id){ list = AR(list); for (var i=0;i<list.length;i++){ if (list[i] && list[i].id===id) return list[i]; } return null; }
+  W._ws = ws; W._ensureWs = ensureWs; // exposed for UI/tests
+
+  /* -------------------------------------------------------- content refs ---
+   * Resolve references to REAL records (no DB duplication). custom:true marks
+   * generated/custom content.
+   */
+  function mergedNpcs(){ var r=T(function(){ return SM.lib&&SM.lib.arr?SM.lib.arr('npc'):null; }); return (isArr(r)&&r.length)?r:(D.NPCS||[]); }
+  function mergedFactions(){ var r=T(function(){ return SM.lib&&SM.lib.arr?SM.lib.arr('faction'):null; }); return (isArr(r)&&r.length)?r:(D.FACTIONS||[]); }
+  function resolveRec(id, type){ return T(function(){ return SM.search&&SM.search.resolve?SM.search.resolve(id,type):null; }); }
+  W.isCustomNpc     = function(id){ return !(resolveRec(id,'npc') || find(mergedNpcs(),id)); };
+  W.isCustomFaction = function(id){ return !(resolveRec(id,'faction') || find(mergedFactions(),id)); };
+
+  /* ============================== SESSIONS ============================== */
+  W.addSession = function(campId, data){
+    var c = get(campId); if (!c) return null; data = data||{}; var w = ensureWs(c);
+    var s = { id: data.id || mkId(c,'sess'), title: str(data.title)||('Session '+(w.sessions.length+1)),
+      summary: str(data.summary), order: (data.order!=null?+data.order:w.sessions.length+1),
+      status: data.status || 'planned', objectives: AR(data.objectives).map(str), completedObjectives: AR(data.completedObjectives).map(str),
+      notes: AR(data.notes), encounters: AR(data.encounters), quests: AR(data.quests), locations: AR(data.locations),
+      npcs: AR(data.npcs), rewards: AR(data.rewards), loot: AR(data.loot), gmNotes: AR(data.gmNotes),
+      created: Date.now(), updated: Date.now() };
+    w.sessions.push(s); save(c); return s;
+  };
+  W.getSession    = function(campId, sid){ return find(ws(get(campId)).sessions, sid); };
+  W.listSessions  = function(campId){ return AR(ws(get(campId)).sessions).slice(); };
+  W.updateSession = function(campId, sid, patch){ var c=get(campId); if(!c) return null; var s=find(ensureWs(c).sessions, sid); if(!s) return null; patch=patch||{};
+    ['title','summary','status','order'].forEach(function(k){ if(patch[k]!=null) s[k]=(k==='order'?+patch[k]:patch[k]); });
+    ['objectives','completedObjectives','notes','encounters','quests','locations','npcs','rewards','loot','gmNotes'].forEach(function(k){ if(isArr(patch[k])) s[k]=patch[k]; });
+    s.updated=Date.now(); save(c); return s; };
+  W.completeSession = function(campId, sid){ var c=get(campId); if(!c) return null; var s=find(ensureWs(c).sessions, sid); if(!s) return null;
+    if (s.status==='completed') return { ok:true, alreadyCompleted:true, session:s };
+    s.status='completed'; s.completedAt=Date.now(); s.updated=Date.now(); save(c); return { ok:true, alreadyCompleted:false, session:s }; };
+  W.duplicateSession = function(campId, sid){ var c=get(campId); if(!c) return null; var s=find(ensureWs(c).sessions, sid); if(!s) return null;
+    var copy=JSON.parse(JSON.stringify(s)); copy.id=mkId(c,'sess'); copy.title=(s.title||'Session')+' (copy)'; copy.status='planned'; delete copy.completedAt; copy.created=Date.now(); copy.updated=Date.now();
+    ensureWs(c).sessions.push(copy); save(c); return copy; };
+  W.archiveSession = function(campId, sid){ return W.updateSession(campId, sid, { status:'archived' }); };
+
+  /* =============================== QUESTS =============================== */
+  W.addQuest = function(campId, data){
+    var c = get(campId); if (!c) return null; data=data||{}; var w=ensureWs(c);
+    var q = { id: data.id || mkId(c,'quest'), title: str(data.title)||'Untitled Quest', description: str(data.description),
+      type: data.type || 'main', status: data.status || 'active', priority: data.priority || 'normal',
+      objectives: AR(data.objectives).map(str), optionalObjectives: AR(data.optionalObjectives).map(str),
+      locationId: data.locationId || null, npcs: AR(data.npcs), factions: AR(data.factions), encounters: AR(data.encounters),
+      rewards: AR(data.rewards), loot: AR(data.loot), notes: AR(data.notes), prerequisites: AR(data.prerequisites),
+      completed: false, rewardsGranted: false, created: Date.now(), updated: Date.now(), custom: data.custom!==false };
+    w.quests.push(q); save(c); return q;
+  };
+  W.getQuest   = function(campId, qid){ return find(ws(get(campId)).quests, qid); };
+  W.listQuests = function(campId){ return AR(ws(get(campId)).quests).slice(); };
+  W.updateQuest= function(campId, qid, patch){ var c=get(campId); if(!c) return null; var q=find(ensureWs(c).quests, qid); if(!q) return null; patch=patch||{};
+    ['title','description','type','status','priority','locationId'].forEach(function(k){ if(patch[k]!=null) q[k]=patch[k]; });
+    ['objectives','optionalObjectives','npcs','factions','encounters','rewards','loot','notes','prerequisites'].forEach(function(k){ if(isArr(patch[k])) q[k]=patch[k]; });
+    q.updated=Date.now(); save(c); return q; };
+  // Idempotent completion. Grants rewards AT MOST ONCE, only via SM.rewards, only if a character is supplied.
+  W.completeQuest = function(campId, qid, opts){
+    opts = opts||{}; var c=get(campId); if(!c) return null; var q=find(ensureWs(c).quests, qid); if(!q) return null;
+    if (q.status==='completed' || q.completed===true) return { ok:true, alreadyCompleted:true, granted:false, rewards:AR(q.rewards), loot:AR(q.loot), quest:q };
+    q.status='completed'; q.completed=true; q.completedAt=Date.now(); q.updated=Date.now();
+    var granted=false;
+    if (!q.rewardsGranted && opts.character && SM.rewards){
+      T(function(){
+        if (typeof SM.rewards.grantXp==='function' && opts.xp!=null) SM.rewards.grantXp(opts.character, opts.xp);
+        if (typeof SM.rewards.grantLoot==='function' && AR(q.loot).length) SM.rewards.grantLoot(opts.character, q.loot);
+      });
+      granted = true; q.rewardsGranted = true;
+    }
+    save(c); return { ok:true, alreadyCompleted:false, granted:granted, rewards:AR(q.rewards), loot:AR(q.loot), quest:q };
+  };
+  W.archiveQuest = function(campId, qid){ return W.updateQuest(campId, qid, { status:'archived' }); };
+  W.reopenQuest  = function(campId, qid){ var c=get(campId); if(!c) return null; var q=find(ensureWs(c).quests, qid); if(!q) return null;
+    q.status='active'; q.completed=false; delete q.completedAt; q.updated=Date.now(); save(c); return q; }; // note: rewardsGranted stays true (no re-grant)
+
+  /* ============================= LOCATIONS ============================= */
+  W.addLocation = function(campId, data){
+    var c=get(campId); if(!c) return null; data=data||{}; var w=ensureWs(c);
+    var l = { id: data.id || mkId(c,'loc'), name: str(data.name)||'Unnamed Location', region: str(data.region),
+      description: str(data.description), environment: str(data.environment), poi: AR(data.poi).map(str),
+      npcs: AR(data.npcs), factions: AR(data.factions), encounters: AR(data.encounters), quests: AR(data.quests),
+      notes: AR(data.notes), threat: str(data.threat), custom: data.custom!==false, created: Date.now(), updated: Date.now() };
+    w.locations.push(l); save(c); return l;
+  };
+  W.getLocation   = function(campId, lid){ return find(ws(get(campId)).locations, lid); };
+  W.listLocations = function(campId){ return AR(ws(get(campId)).locations).slice(); };
+  W.updateLocation= function(campId, lid, patch){ var c=get(campId); if(!c) return null; var l=find(ensureWs(c).locations, lid); if(!l) return null; patch=patch||{};
+    ['name','region','description','environment','threat'].forEach(function(k){ if(patch[k]!=null) l[k]=patch[k]; });
+    ['poi','npcs','factions','encounters','quests','notes'].forEach(function(k){ if(isArr(patch[k])) l[k]=patch[k]; });
+    l.updated=Date.now(); save(c); return l; };
+
+  /* ============================ CAMPAIGN NPCS ========================== */
+  W.attachNpc = function(campId, ref){
+    var c=get(campId); if(!c) return null; ref=ref||{}; if(ref.id==null) return null; var w=ensureWs(c);
+    if (find(w.npcs, ref.id)) return W.setNpc(campId, ref.id, ref); // dedup -> update overlay
+    var rec = resolveRec(ref.id,'npc') || find(mergedNpcs(), ref.id);
+    var n = { id: ref.id, name: str(ref.name) || (rec?rec.name:ref.id), custom: !rec,
+      role: str(ref.role), faction: ref.faction||null, locationId: ref.locationId||null,
+      relationship: str(ref.relationship), status: str(ref.status)||'active', notes: AR(ref.notes), gmNotes: AR(ref.gmNotes) };
+    w.npcs.push(n); save(c); return n;
+  };
+  W.setNpc   = function(campId, id, patch){ var c=get(campId); if(!c) return null; var n=find(ensureWs(c).npcs, id); if(!n) return null; patch=patch||{};
+    ['role','faction','locationId','relationship','status','name'].forEach(function(k){ if(patch[k]!=null) n[k]=patch[k]; });
+    ['notes','gmNotes'].forEach(function(k){ if(isArr(patch[k])) n[k]=patch[k]; }); save(c); return n; };
+  W.listNpcs = function(campId){ return AR(ws(get(campId)).npcs).slice(); };
+  W.detachNpc= function(campId, id){ var c=get(campId); if(!c) return false; var w=ensureWs(c); var n=w.npcs.length; w.npcs=w.npcs.filter(function(x){ return x.id!==id; }); save(c); return w.npcs.length<n; };
+
+  /* ============================== FACTIONS ============================= */
+  W.attachFaction = function(campId, ref){
+    var c=get(campId); if(!c) return null; ref=ref||{}; if(ref.id==null) return null; var w=ensureWs(c);
+    if (find(w.factions, ref.id)) return W.setStanding(campId, ref.id, ref.standing);
+    var rec = resolveRec(ref.id,'faction') || find(mergedFactions(), ref.id);
+    var f = { id: ref.id, name: str(ref.name)||(rec?rec.name:ref.id), custom: !rec,
+      standing: clamp(ref.standing!=null?ref.standing:0, -100, 100), relationships: AR(ref.relationships),
+      allies: AR(ref.allies), enemies: AR(ref.enemies), territory: str(ref.territory),
+      npcs: AR(ref.npcs), quests: AR(ref.quests), notes: AR(ref.notes) };
+    w.factions.push(f); save(c); return f;
+  };
+  W.setStanding = function(campId, id, value){ var c=get(campId); if(!c) return null; var f=find(ensureWs(c).factions, id); if(!f) return null;
+    if (value!=null) f.standing = clamp(value, -100, 100); save(c); return f; };
+  W.listFactions = function(campId){ return AR(ws(get(campId)).factions).slice(); };
+
+  /* ============================= ENCOUNTERS =========================== */
+  W.attachEncounter = function(campId, ref, scope){
+    var c=get(campId); if(!c) return null; ref=ref||{}; scope=scope||{}; var w=ensureWs(c);
+    var rec = resolveRec(ref.id,'encounter');
+    var e = { id: ref.id || mkId(c,'enc'), encounterId: ref.id||null, name: str(ref.name)||(rec?rec.name:(ref.id||'Encounter')),
+      custom: !rec, scopeType: scope.type||'campaign', scopeId: scope.id||null,
+      participants: AR(ref.participants), creatures: AR(ref.creatures), difficulty: str(ref.difficulty)||'standard',
+      status: str(ref.status)||'planned', rewards: AR(ref.rewards), loot: AR(ref.loot), notes: AR(ref.notes), created: Date.now() };
+    w.encounters.push(e); save(c); return e;
+  };
+  W.listEncounters = function(campId){ return AR(ws(get(campId)).encounters).slice(); };
+  W.getEncounter   = function(campId, eid){ return find(ws(get(campId)).encounters, eid); };
+  // Build a combat launch spec from the authoritative bestiary/encounter systems. Does NOT run combat itself.
+  W.launchSpec = function(campId, eid){
+    var e = W.getEncounter(campId, eid); if (!e) return { ok:false, error:'no-encounter' };
+    var creatureIds = AR(e.creatures).map(function(x){ return x&&x.id?x.id:x; });
+    if (!creatureIds.length){ var enc = resolveRec(e.encounterId,'encounter'); if (enc && isArr(enc.creatures)) creatureIds = enc.creatures.map(function(x){ return x&&x.id?x.id:x; }); }
+    var specs = creatureIds.map(function(cid){ return T(function(){ return SM.bestiary&&SM.bestiary.toParticipantSpec?SM.bestiary.toParticipantSpec(cid):{ id:cid }; }) || { id:cid }; });
+    return { ok:true, encounterId:e.encounterId||e.id, engine:'SM.combat', participants:specs, creatureIds:creatureIds };
+  };
+
+  /* =============================== NOTES =============================== */
+  // Scoped notes. scope: 'campaign' | {session:sid} | {quest:qid} | {npc:id} | {location:id} | 'gm'
+  W.addNote = function(campId, scope, text){
+    var c=get(campId); if(!c || !str(text)) return null; var w=ensureWs(c);
+    var line = new Date().toLocaleDateString() + ': ' + str(text);
+    if (scope==null || scope==='campaign'){ w.notes.unshift(line); }
+    else if (scope==='gm'){ w.flags.gmNotes = AR(w.flags.gmNotes); w.flags.gmNotes.unshift(line); }
+    else if (typeof scope==='object'){
+      if (scope.session){ var s=find(w.sessions, scope.session); if(s){ s.notes=AR(s.notes); s.notes.unshift(line); } }
+      else if (scope.quest){ var q=find(w.quests, scope.quest); if(q){ q.notes=AR(q.notes); q.notes.unshift(line); } }
+      else if (scope.npc){ var n=find(w.npcs, scope.npc); if(n){ n.notes=AR(n.notes); n.notes.unshift(line); } }
+      else if (scope.location){ var l=find(w.locations, scope.location); if(l){ l.notes=AR(l.notes); l.notes.unshift(line); } }
+      else { w.notes.unshift(line); }
+    } else { w.notes.unshift(line); }
+    save(c); return line;
+  };
+  W.listNotes = function(campId, scope){ var w=ws(get(campId));
+    if (scope==null || scope==='campaign') return AR(w.notes).slice();
+    if (scope==='gm') return AR(w.flags && w.flags.gmNotes).slice();
+    if (typeof scope==='object'){
+      if (scope.session){ var s=find(w.sessions, scope.session); return s?AR(s.notes).slice():[]; }
+      if (scope.quest){ var q=find(w.quests, scope.quest); return q?AR(q.notes).slice():[]; }
+      if (scope.npc){ var n=find(w.npcs, scope.npc); return n?AR(n.notes).slice():[]; }
+      if (scope.location){ var l=find(w.locations, scope.location); return l?AR(l.notes).slice():[]; }
+    }
+    return [];
+  };
+
+  /* ============================== STATUS =============================== */
+  W.setStatus = function(campId, status){ var c=get(campId); if(!c) return null; ensureWs(c).status = str(status)||'active'; save(c); return ws(c).status; };
+  W.setFlag   = function(campId, key, val){ var c=get(campId); if(!c || key==null) return null; var w=ensureWs(c); if(key==='__proto__'||key==='constructor'||key==='prototype') return null; w.flags[key]=val; save(c); return w.flags; };
+
+  /* ============================= DASHBOARD ============================ */
+  W.progress = function(campId){ var w=ws(get(campId)); var qs=AR(w.quests); var done=qs.filter(function(q){ return q.status==='completed'||q.completed; }).length;
+    var ss=AR(w.sessions); var sdone=ss.filter(function(s){ return s.status==='completed'; }).length;
+    return { questsTotal:qs.length, questsDone:done, sessionsTotal:ss.length, sessionsDone:sdone,
+      questPct: qs.length?Math.round(done/qs.length*100):0 }; };
+  W.dashboard = function(campId){
+    var c = get(campId); if (!c) return null; var w = ws(c);
+    var quests = AR(w.quests);
+    var sessions = AR(w.sessions).slice().sort(function(a,b){ return (a.order||0)-(b.order||0); });
+    var current = sessions.filter(function(s){ return s.status!=='completed' && s.status!=='archived'; })[0] || sessions[sessions.length-1] || null;
+    return {
+      id: c.id, name: c.name, description: c.desc, theme: c.theme||null, gm: c.gm||'', status: w.status,
+      source: c.source||'custom', suggested: !!c.suggested,
+      party: AR(c.chars).slice(),
+      currentSession: current,
+      sessions: sessions,
+      activeQuests: quests.filter(function(q){ return q.status==='active'; }),
+      completedQuests: quests.filter(function(q){ return q.status==='completed'||q.completed; }),
+      locations: AR(w.locations),
+      npcs: AR(w.npcs),
+      factions: AR(w.factions),
+      upcomingEncounters: AR(w.encounters).filter(function(e){ return e.status!=='completed'; }),
+      recentNotes: AR(w.notes).slice(0,8),
+      rewards: (c.plan && AR(c.plan.lootTables)) || [],
+      villain: c.plan && c.plan.villain || null,
+      progress: W.progress(campId)
+    };
+  };
+
+  /* ========================= CAMPAIGN SEARCH (merge) ==================
+   * Deterministic search over campaign workspace content, MERGED with the
+   * authoritative SM.search game results. The core index is never modified.
+   */
+  function norm(s){ return T(function(){ return SM.search&&SM.search.normalize?SM.search.normalize(s):null; }) || str(s).toLowerCase().replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim(); }
+  function scoreText(nq, text){ if(!nq) return 0; text=norm(text); if(!text) return 0; if(text===nq) return 100; if(text.indexOf(nq)>=0) return 60; var t=nq.split(' '),h=0; for(var i=0;i<t.length;i++){ if(t[i]&&text.indexOf(t[i])>=0)h++; } return t.length?Math.round(h/t.length*40):0; }
+  W.searchCampaign = function(q, campId){
+    var nq = norm(q); var out = [];
+    var camps = campId ? [get(campId)].filter(Boolean) : AR(T(function(){ return SM.campaign.list(); }));
+    camps.forEach(function(c){
+      if(!c) return; var w = ws(c);
+      function push(type, id, name, extra){ var sc=Math.max(scoreText(nq,name), scoreText(nq, extra||'')); if(!nq||sc>0) out.push({ type:type, id:id, campId:c.id, name:name, score:sc||1, source:'campaign' }); }
+      push('campaign', c.id, c.name, c.desc);
+      AR(w.sessions).forEach(function(s){ push('session', s.id, s.title, s.summary); });
+      AR(w.quests).forEach(function(qq){ push('quest', qq.id, qq.title, qq.description); });
+      AR(w.locations).forEach(function(l){ push('location', l.id, l.name, l.description); });
+      AR(w.npcs).forEach(function(n){ push('camp-npc', n.id, n.name, n.role); });
+      AR(w.factions).forEach(function(f){ push('camp-faction', f.id, f.name, ''); });
+    });
+    out.sort(function(a,b){ if(b.score!==a.score) return b.score-a.score; return str(a.name)<str(b.name)?-1:1; });
+    return out;
+  };
+  // Unified: campaign workspace results + authoritative game search results.
+  W.search = function(q, opts){
+    opts = opts || {};
+    var campaignItems = W.searchCampaign(q, opts.campId).slice(0, opts.limit||20);
+    var gameItems = T(function(){ return SM.search && SM.search.query ? SM.search.query(q, { limit: opts.limit||20 }).items : []; }) || [];
+    return { query:str(q), campaignItems:campaignItems, gameItems:gameItems,
+      items: campaignItems.concat(gameItems.map(function(g){ return { type:g.type, id:g.id, name:g.name, score:0, source:'game' }; })) };
+  };
+
+})();
+
+/* ==== mc_gmai.js (Phase 7D/7E/7F) ==== */
+/* ============================================================================
+ * mc_gmai.js  —  Phase 7E  —  AI GM / Quest / Encounter / Session Tools (SM.gmai)
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads AFTER 7A-7D modules.
+ *
+ * Extends the PROVIDER-NEUTRAL SM.ai (7-AI) with GM-oriented deterministic,
+ * OFFLINE generators. No network. No LLM claim (SM.ai.isAvailable() stays false).
+ * All output is grounded in REAL StormMythic records (SM.bestiary / SM.encounter /
+ * D.NPCS / D.FACTIONS / D.LOOT / SM.rewards). Every result is marked Suggested
+ * Content via SM.ai.mark. Custom/generated text is flagged custom:true; real record
+ * references are custom:false and carry canonical ids. Hardened against null /
+ * malformed / long / prototype-key input. No eval / Function.
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM==='undefined' || !SM || !SM.ai) return;
+  if (SM._mcGmai_installed) return;
+  SM._mcGmai_installed = true;
+
+  var A = SM.ai, D = SM.data;
+  var G = SM.gmai = SM.gmai || {};
+  G.version = '7E.1';
+
+  function T(fn,d){ try { return fn(); } catch(e){ return d===undefined?null:d; } }
+  function isArr(x){ return Array.isArray(x); }
+  function AR(x){ return isArr(x)?x:[]; }
+  function str(x){ return (x==null)?'':String(x); }
+  function clampN(n,lo,hi){ n=+n; if(isNaN(n))n=lo; return Math.max(lo,Math.min(hi,n)); }
+  function norm(s){ return T(function(){ return SM.search&&SM.search.normalize?SM.search.normalize(s):null; }) || str(s).toLowerCase().replace(/[^a-z0-9 ]+/g,' ').replace(/\s+/g,' ').trim(); }
+  var BAD = { __proto__:1, constructor:1, prototype:1 };
+  function safeCtx(ctx){ if(ctx==null||typeof ctx!=='object'||isArr(ctx)) return {}; var o={}; for(var k in ctx){ if(!Object.prototype.hasOwnProperty.call(ctx,k)) continue; if(BAD[k]) continue; o[k]=ctx[k]; } return o; }
+  function R(seed){ return A.rng(str(seed)); }
+  function pick(arr, rng){ arr=AR(arr); if(!arr.length) return null; return A.pick(arr, rng)!=null?A.pick(arr,rng):arr[0]; }
+  function sampleN(arr, n, seed){ arr=AR(arr); if(!arr.length) return []; var r=T(function(){ return A.sample(arr, clampN(n,0,arr.length), str(seed)); }); return isArr(r)?r:arr.slice(0, clampN(n,0,arr.length)); }
+  function idOf(x){ return x&&typeof x==='object' ? (x.id!=null?x.id:x.name) : x; }
+  function nameOf(x){ return x&&typeof x==='object' ? (x.name!=null?x.name:x.id) : x; }
+  function ref(rec, type){ return rec ? { id:idOf(rec), name:nameOf(rec), type:type, custom:false } : null; }
+
+  /* ------------------------------------------------ real-record accessors */
+  function creatures(){ return T(function(){ return SM.bestiary.all(); },[]) || []; }
+  function bosses(){ var b=T(function(){ return SM.bestiary.byBucket('boss'); },[]); return (isArr(b)&&b.length)?b:creatures().slice(0,40); }
+  function byEnv(env){ if(!env) return []; var e=T(function(){ return SM.bestiary.byEnvironment(env); },[]); return isArr(e)?e:[]; }
+  function byBucketSafe(b){ var r=T(function(){ return SM.bestiary.byBucket(b); },[]); return isArr(r)?r:[]; }
+  function byCatSafe(c){ var r=T(function(){ return SM.bestiary.byCategory(c); },[]); return isArr(r)?r:[]; }
+  function encounters(){ return T(function(){ return SM.encounter.all(); },[]) || []; }
+  function npcs(){ var r=T(function(){ return SM.lib&&SM.lib.arr?SM.lib.arr('npc'):null; }); return (isArr(r)&&r.length)?r:(D.NPCS||[]); }
+  function factions(){ var r=T(function(){ return SM.lib&&SM.lib.arr?SM.lib.arr('faction'):null; }); return (isArr(r)&&r.length)?r:(D.FACTIONS||[]); }
+  function lootTables(){ return (isArr(D.LOOT)?D.LOOT:[]); }
+  function items(){ return T(function(){ return SM.lib&&SM.lib.arr?SM.lib.arr('item'):null; }) || D.ITEMS || []; }
+
+  /* ------------------------------------------------------------ pools ---- */
+  var FIRST=['Kael','Mira','Thorne','Vesk','Ryn','Solveig','Draven','Isolde','Garrick','Nyx','Bram','Corvin','Elenya','Fenmar','Haldis','Ostrek','Sable','Wren','Orin','Perrin'];
+  var EPITH=['the Grey','Ashborn','Ninefingers','of the Vale','Blackbriar','Stormcrow','the Silent','Ironmaw','Duskwarden','the Pale','Ravensworn','of Emberfall'];
+  var ROLES=['merchant','captain','spy','priest','warlord','scholar','smuggler','healer','assassin','noble','hermit','bounty hunter','oracle','fence'];
+  var PERSON=['guarded and dry','warm but calculating','nervous, quick to bargain','proud and unyielding','soft-spoken, watchful','boisterous and reckless','cold and precise'];
+  var MOTIVE=['a debt they cannot repay','protecting a hidden family','revenge for a burned village','fear of an old oath','greed dressed as duty','loyalty to a dead lord'];
+  var SECRET=['is secretly working for the villain','knows the location of the relic','is not who they claim to be','carries a cursed token','owes the party a life-debt they resent'];
+  var HOOK=['offers a job the party cannot refuse','begs for protection on the road','accuses the party of a crime','holds a map to the next location','warns of an ambush ahead'];
+  var ENVIRO=['mountain','forest','swamp','ruins','underground','coast','city','wastes','tundra','volcanic'];
+  var ATMOS=['oppressive silence','choking ash on the wind','ever-present cold mist','distant, wrong music','the reek of old blood'];
+  var POI=['a collapsed gatehouse','a black altar','a flooded crypt','a watchtower with a signal fire','a merchant stall long abandoned','a sealed vault door'];
+  var SCENE=['travel and a complication on the road','a social scene with a key NPC','exploration of the location','a combat encounter','a revelation that shifts the goal','a moral choice with no clean answer'];
+
+  var QUEST_THEMES=[
+    { t:'rescue',        name:'Rescue Operation',  k:['rescue','save','missing','caravan','kidnap','captive','hostage'],
+      obj:['Locate the missing party','Fight through their captors','Escort survivors to safety'], opt:['Recover stolen cargo','Identify who ordered the abduction'] },
+    { t:'investigation', name:'Investigation',      k:['investigate','haunt','fortress','mystery','ruin','uncover','strange'],
+      obj:['Search the site for clues','Question witnesses','Uncover the source of the disturbance'], opt:['Map the full layout','Find the hidden journal'] },
+    { t:'cult',          name:'Cult Disruption',    k:['cult','ritual','summon','sacrifice','heretic'],
+      obj:['Infiltrate the cult','Disrupt the ritual','Confront the cult leader'], opt:['Turn a cultist informant','Destroy the ritual focus'] },
+    { t:'relic',         name:'Relic Recovery',     k:['relic','artifact','recover','legendary','treasure','tome','crown'],
+      obj:['Track the relic','Overcome its guardians','Secure the relic'], opt:['Decipher the relic\u2019s history','Avoid triggering its curse'] },
+    { t:'defense',       name:'Defense',            k:['defend','invasion','siege','protect','hold','city','fort'],
+      obj:['Prepare the defenses','Repel the first assault','Break the enemy command'], opt:['Rally reluctant allies','Sabotage the siege engines'] },
+    { t:'hunt',          name:'Monster Hunt',       k:['hunt','slay','kill','bounty','beast','dragon','monster'],
+      obj:['Pick up the trail','Corner the beast','Slay or drive off the quarry'], opt:['Harvest a trophy','Discover why it strayed'] }
+  ];
+  function detectTheme(prompt){ var p=norm(prompt); for(var i=0;i<QUEST_THEMES.length;i++){ var th=QUEST_THEMES[i]; for(var j=0;j<th.k.length;j++){ if(th.k[j] && p.indexOf(th.k[j])>=0) return th; } } return { t:'adventure', name:'Adventure', k:[], obj:['Reach the objective','Overcome the obstacle','Resolve the situation'], opt:['Find an alternate path','Recover something valuable'] }; }
+
+  /* ===================================================================== *
+   * 7E-2  QUEST GENERATOR
+   * ===================================================================== */
+  function b_quest(ctx){
+    ctx = safeCtx(ctx);
+    var prompt = str(ctx.prompt || ctx.goal || 'an adventure');
+    var tier = clampN(ctx.tier!=null?ctx.tier:1, 1, 10);
+    var env = str(ctx.environment) || null;
+    var theme = detectTheme(prompt);
+    var seed = 'quest:'+norm(prompt)+':'+tier+':'+(env||'');
+    var rng = R(seed);
+    var giver = ref(pick(npcs(), R(seed+':giver')), 'npc');
+    var villain = ref(pick(bosses(), R(seed+':villain')), 'creature');
+    var fac = ref(pick(factions(), R(seed+':fac')), 'faction');
+    var creaturePool = env && byEnv(env).length ? byEnv(env) : creatures();
+    var creatureRefs = sampleN(creaturePool, 3, seed+':crt').map(function(c){ return ref(c,'creature'); }).filter(Boolean);
+    var bossRefs = sampleN(bosses(), 2, seed+':boss').map(function(c){ return ref(c,'creature'); }).filter(Boolean);
+    var encRefs = sampleN(encounters(), 2, seed+':enc').map(function(e){ return ref(e,'encounter'); }).filter(Boolean);
+    var lootRefs = sampleN(lootTables(), 2, seed+':loot').map(function(l){ return ref(l,'loot'); }).filter(Boolean);
+    var rewardSug = b_rewards({ tier:tier, seedNote:seed });
+    var title = theme.name + ': ' + (giver? 'The '+cap(word(prompt)) : cap(word(prompt)));
+    return {
+      kind:'quest', title: str(title).slice(0,120), custom:true,
+      premise: A.narrate('quest', { seed:seed }).text,
+      goalPrompt: prompt, theme: theme.name, tier: tier, environment: env,
+      objectives: theme.obj.slice(), optionalObjectives: theme.opt.slice(),
+      questGiver: giver, villain: villain, faction: fac,
+      locations: [ b_locationLite({ seed:seed+':loc', environment:env }) ],
+      npcs: [giver].filter(Boolean), factions: [fac].filter(Boolean),
+      encounters: encRefs, creatures: creatureRefs, bossPossibilities: bossRefs,
+      rewards: rewardSug.xp, loot: lootRefs,
+      gmNotes: 'Uses real StormMythic records for NPC/faction/creature/encounter/loot references (custom:false). Narrative text is generated and should be reviewed. Nothing is granted until the quest is completed in the workspace.'
+    };
+  }
+  function word(s){ s=str(s).trim().split(/\s+/); return s[s.length-1]||s[0]||'quest'; }
+  function cap(s){ s=str(s); return s.charAt(0).toUpperCase()+s.slice(1); }
+  G.generateQuest = function(prompt, ctx){ ctx = safeCtx(ctx); ctx.prompt = (prompt!=null?prompt:ctx.prompt); return A.mark(b_quest(ctx)); };
+
+  /* ===================================================================== *
+   * 7E-3  ENCOUNTER GENERATOR
+   * ===================================================================== */
+  function b_encounter(ctx){
+    ctx = safeCtx(ctx);
+    var env = str(ctx.environment || ctx.location) || null;
+    var partySize = clampN(ctx.partySize!=null?ctx.partySize:4, 1, 12);
+    var difficulty = str(ctx.difficulty)||'standard';
+    var wantBoss = !!ctx.boss || difficulty==='boss' || difficulty==='deadly';
+    var seed = 'enc:'+(env||'any')+':'+partySize+':'+difficulty+':'+(wantBoss?'b':'n')+':'+str(ctx.theme||ctx.creatureType||'');
+    var diffMul = difficulty==='easy'?1 : difficulty==='hard'?2 : difficulty==='deadly'?3 : 1;
+    var count = clampN(Math.round(partySize*diffMul/1.5), 1, 12);
+    var pool = env && byEnv(env).length ? byEnv(env) : (ctx.creatureType && byCatSafe(str(ctx.creatureType)).length ? byCatSafe(str(ctx.creatureType)) : creatures());
+    var picks = sampleN(pool, count, seed).map(function(c){ return ref(c,'creature'); }).filter(Boolean);
+    var boss = wantBoss ? ref(pick(bosses(), R(seed+':boss')),'creature') : null;
+    return {
+      kind:'encounter', custom:true, environment: env, difficulty: difficulty, partySize: partySize,
+      title: cap(difficulty)+' '+(env?cap(env)+' ':'')+'Encounter',
+      creatures: picks, boss: boss,
+      totalCombatants: picks.length + (boss?1:0),
+      engine: 'SM.combat',
+      launchHint: 'Attach to a campaign/session and launch via the workspace (SM.campaignws.launchSpec) which feeds SM.combat/SM.cbt. No new combat engine is created.',
+      rewardSuggestion: b_rewards({ tier: clampN(ctx.tier!=null?ctx.tier:1,1,10), seedNote:seed }),
+      gmNotes: 'All creatures are real bestiary records (custom:false, canonical ids). No fabricated creature stat blocks. Combat is resolved only by the authoritative SM.combat engine.'
+    };
+  }
+  G.generateEncounter = function(ctx){ return A.mark(b_encounter(ctx)); };
+
+  /* ===================================================================== *
+   * 7E-4  SESSION PLANNER
+   * ===================================================================== */
+  function b_session(ctx){
+    ctx = safeCtx(ctx);
+    var dash = ctx.campId ? T(function(){ return SM.campaignws && SM.campaignws.dashboard(ctx.campId); }) : null;
+    var theme = str(ctx.theme) || (dash && dash.theme) || 'adventure';
+    var seed = 'sess:'+(ctx.campId||'')+':'+theme+':'+str(ctx.n||1);
+    var rng = R(seed);
+    var activeQuests = dash ? AR(dash.activeQuests) : [];
+    var dashNpcs = dash ? AR(dash.npcs) : [];
+    var dashLocs = dash ? AR(dash.locations) : [];
+    var dashFacs = dash ? AR(dash.factions) : [];
+    var scenes = sampleN(SCENE, 4, seed+':sc');
+    var npcApp = (dashNpcs.length? dashNpcs.slice(0,2).map(function(n){ return { id:n.id, name:n.name, custom:!!n.custom }; })
+                 : sampleN(npcs(),2,seed+':npc').map(function(n){ return ref(n,'npc'); }).filter(Boolean));
+    var encPick = ref(pick(encounters(), R(seed+':enc')),'encounter');
+    var bossPick = ref(pick(bosses(), R(seed+':boss')),'creature');
+    return {
+      kind:'session', custom:true,
+      title: cap(theme)+' \u2014 Session '+clampN(ctx.n!=null?ctx.n:1,1,999),
+      opening: A.narrate('scene', { seed:seed+':open' }).text,
+      objectives: (activeQuests.length? activeQuests.slice(0,3).map(function(q){ return 'Advance: '+str(q.title); })
+                   : ['Introduce the session goal','Deliver a complication','Set up the next hook']),
+      scenes: scenes,
+      locations: (dashLocs.length? dashLocs.slice(0,2).map(function(l){ return { id:l.id, name:l.name }; }) : [ b_locationLite({ seed:seed+':loc' }) ]),
+      npcAppearances: npcApp,
+      factionActivity: (dashFacs.length? dashFacs.slice(0,2).map(function(f){ return { id:f.id, name:f.name, standing:f.standing }; })
+                        : sampleN(factions(),1,seed+':fac').map(function(f){ return ref(f,'faction'); }).filter(Boolean)),
+      encounters: [encPick].filter(Boolean),
+      possibleBoss: bossPick,
+      treasure: b_rewards({ tier: clampN(ctx.tier!=null?ctx.tier:1,1,10), seedNote:seed }),
+      branchingChoices: ['Pursue the direct route (risk combat)','Seek an ally first (risk delay)'],
+      ending: A.narrate('cliffhanger', { seed:seed+':end' }).text,
+      gmNotes: dash ? 'Plan references this campaign\u2019s existing quests/NPCs/locations/factions.' : 'No campaign supplied; plan uses sampled real records. Attach to a campaign for continuity.'
+    };
+  }
+  G.planSession = function(ctx){ return A.mark(b_session(ctx)); };
+
+  /* ===================================================================== *
+   * 7E-5  NPC GENERATOR / ASSISTANT
+   * ===================================================================== */
+  function findExistingNpc(ctx){
+    var q = norm(ctx.name || ctx.query || ctx.role); if(!q) return null;
+    var list = npcs();
+    for (var i=0;i<list.length;i++){ var n=list[i]; if(!n) continue; if (norm(n.name)===q) return n; }
+    for (var j=0;j<list.length;j++){ var m=list[j]; if(!m) continue; if (norm(m.name).indexOf(q)>=0 || norm(m.role||'').indexOf(q)>=0) return m; }
+    return null;
+  }
+  function b_npc(ctx){
+    ctx = safeCtx(ctx);
+    var existing = (ctx.preferExisting!==false) ? findExistingNpc(ctx) : null;
+    if (existing){ return { kind:'npc', recommendExisting:true, custom:false, id:idOf(existing), name:nameOf(existing),
+      note:'An existing canonical NPC matches this request \u2014 prefer reusing it rather than duplicating the database.', existing:{ id:idOf(existing), name:nameOf(existing) } }; }
+    var seed = 'npc:'+norm(ctx.name||ctx.role||ctx.query||'')+':'+str(ctx.faction||'')+':'+str(ctx.seedNote||'');
+    var rng = R(seed);
+    var name = str(ctx.name) || (pick(FIRST,rng)+' '+pick(EPITH,R(seed+':e')));
+    var fac = ctx.faction!=null ? ref(pick(factions().filter(function(f){ return norm(f.name).indexOf(norm(ctx.faction))>=0; }).concat(factions()), R(seed+':f')),'faction') : ref(pick(factions(),R(seed+':f')),'faction');
+    return {
+      kind:'npc', custom:true, recommendExisting:false,
+      name: name, role: str(ctx.role) || pick(ROLES,R(seed+':r')),
+      personality: pick(PERSON,R(seed+':p')), goals: 'Driven by '+pick(MOTIVE,R(seed+':g')),
+      motivation: pick(MOTIVE,R(seed+':m')), faction: fac, location: str(ctx.location)||null,
+      relationships: ['Connected to '+ (fac?fac.name:'a local faction')],
+      hooks: [cap(name.split(' ')[0])+' '+pick(HOOK,R(seed+':h'))],
+      secrets: [cap(name.split(' ')[0])+' '+pick(SECRET,R(seed+':s'))],
+      notes:'Custom NPC. Faction reference is a real record when present; the personality, hooks and secrets are generated \u2014 review before use.'
+    };
+  }
+  G.generateNpc = function(ctx){ return A.mark(b_npc(ctx)); };
+
+  /* ===================================================================== *
+   * 7E-6  LOCATION GENERATOR
+   * ===================================================================== */
+  function b_locationLite(ctx){ ctx=safeCtx(ctx); var seed=str(ctx.seed||('loc:'+str(ctx.name||'')+':'+str(ctx.environment||''))); var rng=R(seed);
+    return { name: str(ctx.name)||('The '+cap(pick(POI,rng).replace(/^a /,'').split(' ').pop())+' of '+pick(EPITH,R(seed+':e')).replace(/^(the |of )/,'')),
+      environment: str(ctx.environment)||pick(ENVIRO,R(seed+':v')), custom:true }; }
+  function b_location(ctx){
+    ctx = safeCtx(ctx);
+    var seed = 'loc:'+norm(ctx.name||'')+':'+str(ctx.environment||'')+':'+str(ctx.seedNote||'');
+    var rng = R(seed);
+    var env = str(ctx.environment) || pick(ENVIRO,rng);
+    var creaturePool = byEnv(env).length ? byEnv(env) : creatures();
+    return {
+      kind:'location', custom:true,
+      name: str(ctx.name) || ('The '+cap(pick(POI,rng).split(' ').pop())+' of '+cap(pick(FIRST,R(seed+':n')))),
+      environment: env, atmosphere: pick(ATMOS,R(seed+':a')),
+      purpose: 'A '+env+' site tied to the current arc',
+      poi: sampleN(POI,3,seed+':poi'),
+      npcs: sampleN(npcs(),2,seed+':npc').map(function(n){ return ref(n,'npc'); }).filter(Boolean),
+      factions: sampleN(factions(),1,seed+':fac').map(function(f){ return ref(f,'faction'); }).filter(Boolean),
+      encounters: sampleN(encounters(),1,seed+':enc').map(function(e){ return ref(e,'encounter'); }).filter(Boolean),
+      creatures: sampleN(creaturePool,2,seed+':crt').map(function(c){ return ref(c,'creature'); }).filter(Boolean),
+      quests: ['A rumor draws the party here','Something valuable is hidden within'],
+      secrets: [pick(SECRET,R(seed+':sec'))],
+      gmNotes:'Custom location. NPC/faction/encounter/creature references are real records; poi/atmosphere/secrets are generated \u2014 review before use.'
+    };
+  }
+  G.generateLocation = function(ctx){ return A.mark(b_location(ctx)); };
+
+  /* ===================================================================== *
+   * 7E-7  REWARD / LOOT ASSISTANT  (uses SM.rewards; grants NOTHING)
+   * ===================================================================== */
+  function b_rewards(ctx){
+    ctx = safeCtx(ctx);
+    var tier = clampN(ctx.tier!=null?ctx.tier:1, 1, 10);
+    var level = clampN(ctx.level!=null?ctx.level:tier*3, 1, 30);
+    var seed = 'rw:'+tier+':'+level+':'+str(ctx.seedNote||'');
+    var xp = T(function(){ return SM.rewards && SM.rewards.xpForLevel ? SM.rewards.xpForLevel(level) : level*100; }, level*100);
+    var lootRefs = sampleN(lootTables(), Math.min(3, 1+tier), seed+':loot').map(function(l){ return ref(l,'loot'); }).filter(Boolean);
+    var itemRefs = sampleN(items(), Math.min(3, 1+tier), seed+':item').map(function(i){ return ref(i,'item'); }).filter(Boolean);
+    return {
+      kind:'rewards', custom:false, tier:tier,
+      xp: (typeof xp==='number'? xp : level*100),
+      gold: tier*50 + level*10,
+      loot: lootRefs, items: itemRefs,
+      note:'Recommendation only. Uses SM.rewards and real loot/item records. NOTHING is granted \u2014 rewards apply only when a quest/encounter is actually completed in the workspace.'
+    };
+  }
+  G.suggestRewards = function(ctx){ return A.mark(b_rewards(ctx)); };
+
+  /* ===================================================================== *
+   * 7E-8  BOSS & CREATURE ASSISTANT
+   * ===================================================================== */
+  function b_creatures(ctx){
+    ctx = safeCtx(ctx);
+    var env = str(ctx.environment)||null;
+    var seed = 'crt:'+(env||'any')+':'+str(ctx.tier||1)+':'+str(ctx.seedNote||'');
+    var pool = env && byEnv(env).length ? byEnv(env) : creatures();
+    function grp(list){ return sampleN(list.length?list:pool, 4, seed+':'+list.length).map(function(c){ return ref(c,'creature'); }).filter(Boolean); }
+    return {
+      kind:'creatures', custom:false, environment: env,
+      common: grp(byBucketSafe('minion').length?byBucketSafe('minion'):byBucketSafe('standard')),
+      elites: grp(byBucketSafe('elite')),
+      bosses: sampleN(bosses(),4,seed+':boss').map(function(c){ return ref(c,'creature'); }).filter(Boolean),
+      dragons: grp(byCatSafe('dragon')),
+      mythic: grp(byCatSafe('mythic')),
+      ascendant: grp(byCatSafe('ascendant')),
+      note:'All recommendations are real bestiary records (canonical ids). Empty groups mean no records match that bucket/category in the current data.'
+    };
+  }
+  G.suggestCreatures = function(ctx){ return A.mark(b_creatures(ctx)); };
+  G.suggestBoss = function(ctx){ ctx=safeCtx(ctx); var seed='boss:'+str(ctx.environment||'')+':'+str(ctx.tier||1)+':'+str(ctx.seedNote||'');
+    return A.mark({ kind:'boss', custom:false, bosses: sampleN(bosses(),5,seed).map(function(c){ return ref(c,'creature'); }).filter(Boolean),
+      note:'Real bestiary boss-tier records; select one and attach as an encounter to launch via SM.combat.' }); };
+
+  /* ===================================================================== *
+   * 7E-9  SESSION RECAP  (deterministic / offline)
+   * ===================================================================== */
+  function b_recap(data){
+    data = safeCtx(data);
+    var title = str(data.title)||'the session';
+    var done = AR(data.completedObjectives).map(str).filter(Boolean);
+    var open = AR(data.objectives).map(str).filter(Boolean);
+    var enc = AR(data.encounters).length;
+    var seed = 'recap:'+norm(title)+':'+done.length+':'+open.length+':'+enc;
+    var parts = [];
+    parts.push('Recap of '+title+'.');
+    if (done.length) parts.push('The party '+ (done.length===1?'completed':'accomplished') +': '+done.join('; ')+'.');
+    if (enc) parts.push('They faced '+enc+' encounter'+(enc===1?'':'s')+' along the way.');
+    if (open.length) parts.push('Still open: '+open.join('; ')+'.');
+    parts.push(A.narrate('recap', { seed:seed }).text);
+    return { kind:'recap', custom:true, generated:true, title:title, text: parts.join(' '),
+      note:'Generated offline by a deterministic helper (not an AI model). Review and edit before sharing with players.' };
+  }
+  G.recap = function(data){ return A.mark(b_recap(data)); };
+
+  /* ===================================================================== *
+   * 7E-1  GM ASSISTANT (bundle)
+   * ===================================================================== */
+  function b_assist(ctx){
+    ctx = safeCtx(ctx);
+    var seed = 'assist:'+str(ctx.campId||'')+':'+str(ctx.theme||'')+':'+str(ctx.n||1);
+    return { kind:'gm-assist', custom:true,
+      sessionIdea: b_session(ctx),
+      questHook: b_quest({ prompt: str(ctx.prompt||ctx.theme||'a new lead'), tier:ctx.tier, environment:ctx.environment }),
+      encounterIdea: b_encounter(ctx),
+      npcIdea: b_npc({ seedNote:seed }),
+      rewardIdea: b_rewards(ctx),
+      note:'A bundle of Suggested Content for GM prep. Nothing is applied to the campaign or game state until you explicitly save/attach it.' };
+  }
+  G.assist = function(ctx){ return A.mark(b_assist(ctx)); };
+
+  /* ------------------------------------------------ register suggestors -- */
+  T(function(){
+    A.registerSuggestor('gm-quest',     function(ctx){ return b_quest(ctx); });
+    A.registerSuggestor('gm-encounter', function(ctx){ return b_encounter(ctx); });
+    A.registerSuggestor('gm-session',   function(ctx){ return b_session(ctx); });
+    A.registerSuggestor('gm-npc',       function(ctx){ return b_npc(ctx); });
+    A.registerSuggestor('gm-location',  function(ctx){ return b_location(ctx); });
+    A.registerSuggestor('gm-rewards',   function(ctx){ return b_rewards(ctx); });
+    A.registerSuggestor('gm-creatures', function(ctx){ return b_creatures(ctx); });
+    A.registerSuggestor('gm-boss',      function(ctx){ return b_creatures(ctx); });
+    A.registerSuggestor('gm-recap',     function(ctx){ return b_recap(ctx); });
+    A.registerSuggestor('gm-assist',    function(ctx){ return b_assist(ctx); });
+  });
+
+})();
+
+/* ==== mc_7dui.js (Phase 7D/7E/7F) ==== */
+/* ============================================================================
+ * mc_7dui.js  —  Phase 7D/7F  —  Campaign Workspace + GM AI UI (SM.screens.*)
+ * ----------------------------------------------------------------------------
+ * ADDITIVE. Guarded IIFE. Loads LAST (after mc_campaignws.js and mc_gmai.js).
+ *
+ * Adds 5 screens: workspace, csession, cquest, cloc, gmai. Every screen is a
+ * PURE string renderer that tolerates being called with NO args (render-audit
+ * contracts J15/VF28/G10) and never throws. Navigation is DECORATED (append-if-
+ * absent, guard-flagged) — existing nav/screens are never overwritten. All user
+ * text is escaped. No eval / Function / network.
+ * ==========================================================================*/
+;(function(){
+  if (typeof SM==='undefined' || !SM) return;
+  if (SM._mc7dui_installed) return;
+  SM._mc7dui_installed = true;
+
+  var U = SM.ui, E = SM.engine, D = SM.data;
+  if (!U) return;
+  if (!SM.screens) SM.screens = {};
+  var W = SM.campaignws, G = SM.gmai;
+  var hasDoc = (typeof document!=='undefined' && document && typeof document.getElementById==='function');
+  function esc(s){ return U.esc ? U.esc(s) : String(s==null?'':s); }
+  function T(fn,d){ try { return fn(); } catch(e){ return d===undefined?'':d; } }
+  function jarg(s){ return String(s==null?'':s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+  function AR(x){ return Array.isArray(x)?x:[]; }
+  function activeChar(){ return T(function(){ return SM.act&&SM.act.get?SM.act.get():null; },null) || T(function(){ return E.store&&E.store.activeChar?E.store.activeChar():null; },null); }
+
+  /* ------------------------------------------------------- NAV titles --- */
+  if (U.NAV){
+    if (!U.NAV.workspace) U.NAV.workspace = { t:'Campaign Workspace', i:'🗺️' };
+    if (!U.NAV.gmai)      U.NAV.gmai      = { t:'AI GM Tools',        i:'🎲' };
+    if (!U.NAV.csession)  U.NAV.csession  = { t:'Session',            i:'📓' };
+    if (!U.NAV.cquest)    U.NAV.cquest    = { t:'Quest',              i:'📜' };
+    if (!U.NAV.cloc)      U.NAV.cloc      = { t:'Location',           i:'🏰' };
+  }
+
+  /* ---------------------------------------------------- render helpers --- */
+  function panel(inner){ return '<div class="panel">'+inner+'</div>'; }
+  function eyebrow(t){ return '<div class="eyebrow">'+esc(t)+'</div>'; }
+  function pill(t){ return '<span class="tag">'+esc(t)+'</span>'; }
+  function suggestedBadge(){ return '<span class="tag" title="Assembled offline from existing data — not official; review before use">Suggested Content</span>'; }
+  function crumbs(parts){ return '<div class="small muted" style="margin-bottom:8px">'+AR(parts).map(function(p,i){ var sep=i>0?' &rsaquo; ':''; if(p.onclick) return sep+'<a href="javascript:void(0)" onclick="'+p.onclick+'" style="color:inherit;text-decoration:underline">'+esc(p.label)+'</a>'; return sep+esc(p.label); }).join('')+'</div>'; }
+  function progressBar(pct){ pct=Math.max(0,Math.min(100,+pct||0)); return '<div style="background:rgba(255,255,255,.08);border-radius:6px;height:10px;overflow:hidden;margin:6px 0"><div style="height:100%;width:'+pct+'%;background:linear-gradient(90deg,#7a5cff,#4bd)"></div></div>'; }
+  function row(icon, title, sub, onclick){ return '<div class="li"'+(onclick?' onclick="'+onclick+'"':'')+'><div class="ava">'+esc(icon)+'</div><div class="meta"><div class="t">'+esc(title)+'</div><div class="s">'+esc(sub||'')+'</div></div></div>'; }
+  function emptyNote(t){ return '<p class="small muted" style="margin-top:6px">'+esc(t)+'</p>'; }
+  function list(items, fn){ items=AR(items); if(!items.length) return ''; return items.map(fn).join(''); }
+
+  /* generic renderer for a Suggested-Content object from SM.gmai */
+  function renderSuggestion(obj){
+    if (!obj || typeof obj!=='object') return emptyNote('No suggestion generated.');
+    var out = '<div class="small muted" style="margin-bottom:6px">'+suggestedBadge()+' '+esc(obj.disclaimer||'')+'</div>';
+    function refLine(r){ return r ? row(iconFor(r.type), r.name||r.id, r.type||'', "SM.ui7.open('"+jarg(r.type)+"','"+jarg(r.id)+"')") : ''; }
+    function refBlock(label, arr){ arr=AR(arr); if(!arr.length) return ''; return '<div style="margin-top:8px"><div class="small muted">'+esc(label)+'</div>'+arr.map(refLine).join('')+'</div>'; }
+    if (obj.title) out += '<div style="font-weight:600;margin:4px 0">'+esc(obj.title)+'</div>';
+    if (obj.premise) out += '<p class="small">'+esc(obj.premise)+'</p>';
+    if (obj.text) out += '<p class="small">'+esc(obj.text)+'</p>';
+    if (obj.personality) out += '<p class="small"><b>Personality:</b> '+esc(obj.personality)+'</p>';
+    if (obj.motivation) out += '<p class="small"><b>Motivation:</b> '+esc(obj.motivation)+'</p>';
+    if (obj.atmosphere) out += '<p class="small"><b>Atmosphere:</b> '+esc(obj.atmosphere)+'</p>';
+    if (AR(obj.objectives).length) out += '<div class="small muted" style="margin-top:6px">Objectives</div><ul class="small">'+list(obj.objectives,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>';
+    if (AR(obj.optionalObjectives).length) out += '<div class="small muted">Optional</div><ul class="small">'+list(obj.optionalObjectives,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>';
+    if (AR(obj.scenes).length) out += '<div class="small muted" style="margin-top:6px">Scenes</div><ul class="small">'+list(obj.scenes,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>';
+    if (AR(obj.poi).length) out += '<div class="small muted" style="margin-top:6px">Points of Interest</div><ul class="small">'+list(obj.poi,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>';
+    if (AR(obj.hooks).length) out += '<div class="small muted" style="margin-top:6px">Hooks</div><ul class="small">'+list(obj.hooks,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>';
+    if (AR(obj.secrets).length) out += '<div class="small muted">Secrets</div><ul class="small">'+list(obj.secrets,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>';
+    out += refLine(obj.questGiver?Object.assign({},obj.questGiver):null);
+    out += refBlock('Villain', obj.villain?[obj.villain]:[]);
+    out += refBlock('Boss', obj.boss?[obj.boss]:[]);
+    out += refBlock('Possible Boss', obj.possibleBoss?[obj.possibleBoss]:[]);
+    out += refBlock('Creatures', obj.creatures);
+    out += refBlock('Boss Possibilities', obj.bossPossibilities);
+    out += refBlock('Bosses', obj.bosses);
+    out += refBlock('Encounters', obj.encounters);
+    out += refBlock('NPCs', obj.npcs || obj.npcAppearances);
+    out += refBlock('Factions', obj.factions);
+    out += refBlock('Loot', obj.loot);
+    out += refBlock('Items', obj.items);
+    if (obj.xp!=null) out += '<p class="small"><b>Suggested XP:</b> '+esc(obj.xp)+(obj.gold!=null?' &middot; <b>Gold:</b> '+esc(obj.gold):'')+'</p>';
+    if (obj.recommendExisting) out += '<div class="small" style="margin-top:6px">'+pill('Reuse existing')+' '+esc(obj.name)+' &mdash; '+esc(obj.note||'')+'</div>';
+    if (obj.gmNotes) out += '<p class="small muted" style="margin-top:8px"><b>GM Notes:</b> '+esc(obj.gmNotes)+'</p>';
+    if (obj.note) out += '<p class="small muted" style="margin-top:6px">'+esc(obj.note)+'</p>';
+    return out;
+  }
+  var TYPE_ICON = { kin:'🧬',lineage:'🌿','class':'🎖️',discipline:'📕',ability:'✨',spell:'🔮',magic:'🪄',item:'🗡️',creature:'🐉',npc:'🧑',faction:'🏳️',encounter:'⚔️',recipe:'⚗️',loot:'💰',condition:'☠️',campaign:'🗺️',session:'📓',quest:'📜',location:'🏰' };
+  function iconFor(t){ return TYPE_ICON[t]||'📄'; }
+
+  /* ============================ WORKSPACE ============================ */
+  SM.screens.workspace = function(p){
+    return T(function(){
+      p = p || {};
+      var opened = p.opened || p.camp || p.id || null;
+      if (!opened){
+        var camps = AR(T(function(){ return SM.campaign.list(); },[]));
+        var body = eyebrow('Campaign Workspace') +
+          '<p class="small muted" style="margin-top:6px">Manage your campaigns: sessions, quests, locations, NPCs, factions, encounters and notes. Combat launches through the game\u2019s own engine.</p>' +
+          '<div style="margin:8px 0"><button class="btn sm primary" onclick="SM.ui.go(\'gmai\')">Open AI GM Tools</button> ' +
+          '<button class="btn sm" onclick="SM.ui.go(\'builder\')">Campaign Builder</button></div>';
+        body += camps.length ? list(camps, function(c){ var pr=T(function(){ return W.progress(c.id); },{questPct:0}); return row('🗺️', c.name||'Untitled', (c.theme?c.theme+' · ':'')+(pr.questsDone||0)+'/'+(pr.questsTotal||0)+' quests', "SM.ui.go('workspace',{opened:'"+jarg(c.id)+"'})"); })
+                             : emptyNote('No campaigns yet. Use the Campaign Builder or AI GM Tools to create one.');
+        return panel(body);
+      }
+      var dash = T(function(){ return W.dashboard(opened); }, null);
+      if (!dash) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Not found'}]) + emptyNote('That campaign could not be found.'));
+      var cid = jarg(dash.id);
+      var head = crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:dash.name||'Campaign'}]);
+      var hdr = panel(eyebrow(dash.name||'Campaign') +
+        '<div class="small muted" style="margin-top:4px">'+(dash.theme?pill(dash.theme)+' ':'')+(dash.gm?'GM: '+esc(dash.gm)+' · ':'')+'Status: '+esc(dash.status||'active')+(dash.suggested?' '+suggestedBadge():'')+'</div>' +
+        (dash.description?'<p class="small" style="margin-top:6px">'+esc(dash.description)+'</p>':'') +
+        '<div class="small muted" style="margin-top:8px">Quest progress: '+(dash.progress.questsDone||0)+'/'+(dash.progress.questsTotal||0)+' ('+(dash.progress.questPct||0)+'%)</div>'+progressBar(dash.progress.questPct) +
+        '<div style="margin-top:8px"><button class="btn sm primary" onclick="SM.ui7d.planSession(\''+cid+'\')">Plan Session (AI)</button> '+
+        '<button class="btn sm" onclick="SM.ui.go(\'gmai\',{camp:\''+cid+'\'})">AI GM Tools</button></div>');
+      function section(title, arr, fn, addBtn){ var b='<div class="panel" style="margin-top:10px">'+eyebrow(title); b += AR(arr).length? list(arr,fn) : emptyNote('None yet.'); if(addBtn) b+='<div style="margin-top:8px">'+addBtn+'</div>'; return b+'</div>'; }
+      var party = section('Party', dash.party, function(m){ var nm=(m&&(m.name||m.id))||String(m); return row('🧑', nm, 'party member'); });
+      var cur = '<div class="panel" style="margin-top:10px">'+eyebrow('Current Session')+(dash.currentSession? row('📓', dash.currentSession.title||'Session', dash.currentSession.status||'', "SM.ui.go('csession',{camp:'"+cid+"',id:'"+jarg(dash.currentSession.id)+"'})") : emptyNote('No active session.'))+'<div style="margin-top:8px"><button class="btn sm" onclick="SM.ui7d.addSession(\''+cid+'\')">Add Session</button></div></div>';
+      var aq = section('Active Quests', dash.activeQuests, function(q){ return row('📜', q.title||'Quest', (q.priority||'')+' · '+(q.type||''), "SM.ui.go('cquest',{camp:'"+cid+"',id:'"+jarg(q.id)+"'})"); }, '<button class="btn sm" onclick="SM.ui7d.addQuest(\''+cid+'\')">Add Quest</button> <button class="btn sm" onclick="SM.ui.go(\'gmai\',{camp:\''+cid+'\',tool:\'quest\'})">Generate Quest (AI)</button>');
+      var cq = section('Completed Quests', dash.completedQuests, function(q){ return row('✅', q.title||'Quest', 'completed', "SM.ui.go('cquest',{camp:'"+cid+"',id:'"+jarg(q.id)+"'})"); });
+      var ses = section('Sessions', dash.sessions, function(s){ return row('📓', s.title||'Session', s.status||'', "SM.ui.go('csession',{camp:'"+cid+"',id:'"+jarg(s.id)+"'})"); });
+      var locs = section('Locations', dash.locations, function(l){ return row('🏰', l.name||'Location', (l.environment||'')+(l.custom?' · custom':''), "SM.ui.go('cloc',{camp:'"+cid+"',id:'"+jarg(l.id)+"'})"); }, '<button class="btn sm" onclick="SM.ui.go(\'gmai\',{camp:\''+cid+'\',tool:\'location\'})">Generate Location (AI)</button>');
+      var np = section('NPCs', dash.npcs, function(n){ return row('🧑', n.name||n.id, (n.role||'')+(n.custom?' · custom':''), n.custom?null:"SM.ui7.open('npc','"+jarg(n.id)+"')"); }, '<button class="btn sm" onclick="SM.ui.go(\'gmai\',{camp:\''+cid+'\',tool:\'npc\'})">Generate NPC (AI)</button>');
+      var fac = section('Factions', dash.factions, function(f){ return row('🏳️', f.name||f.id, 'standing: '+(f.standing!=null?f.standing:0), f.custom?null:"SM.ui7.open('faction','"+jarg(f.id)+"')"); });
+      var enc = section('Upcoming Encounters', dash.upcomingEncounters, function(e){ return row('⚔️', e.name||'Encounter', (e.difficulty||'')+' · '+(e.status||''), "SM.ui7d.launchEncounter('"+cid+"','"+jarg(e.id)+"')"); }, '<button class="btn sm" onclick="SM.ui.go(\'gmai\',{camp:\''+cid+'\',tool:\'encounter\'})">Generate Encounter (AI)</button>');
+      var notes = '<div class="panel" style="margin-top:10px">'+eyebrow('Recent Notes')+(AR(dash.recentNotes).length? '<ul class="small">'+list(dash.recentNotes,function(n){ return '<li>'+esc(n)+'</li>'; })+'</ul>' : emptyNote('No notes yet.'))+'</div>';
+      return head + hdr + party + cur + aq + cq + ses + locs + np + fac + enc + notes;
+    }, panel(emptyNote('Workspace unavailable.')));
+  };
+
+  /* ============================= SESSION ============================= */
+  SM.screens.csession = function(p){
+    return T(function(){
+      p = p || {}; var cid = p.camp||p.campId, sid = p.id||p.sid;
+      if (!cid || !sid) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Session'}]) + emptyNote('Open a session from a campaign workspace.'));
+      var s = T(function(){ return W.getSession(cid, sid); }, null);
+      var camp = T(function(){ return SM.campaign.get(cid); }, null);
+      if (!s) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Session'}]) + emptyNote('Session not found.'));
+      var head = crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:(camp&&camp.name)||'Campaign',onclick:"SM.ui.go('workspace',{opened:'"+jarg(cid)+"'})"},{label:s.title||'Session'}]);
+      var body = eyebrow(s.title||'Session') + '<div class="small muted" style="margin-top:4px">Status: '+esc(s.status||'planned')+'</div>' +
+        (s.summary?'<p class="small" style="margin-top:6px">'+esc(s.summary)+'</p>':'') +
+        (AR(s.objectives).length?'<div class="small muted" style="margin-top:6px">Objectives</div><ul class="small">'+list(s.objectives,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'') +
+        (AR(s.notes).length?'<div class="small muted">Notes</div><ul class="small">'+list(s.notes,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'') +
+        '<div style="margin-top:10px"><button class="btn sm primary" onclick="SM.ui7d.completeSession(\''+jarg(cid)+'\',\''+jarg(sid)+'\')">Complete</button> '+
+        '<button class="btn sm" onclick="SM.ui7d.duplicateSession(\''+jarg(cid)+'\',\''+jarg(sid)+'\')">Duplicate</button> '+
+        '<button class="btn sm" onclick="SM.ui7d.recapSession(\''+jarg(cid)+'\',\''+jarg(sid)+'\')">AI Recap</button></div>';
+      return head + panel(body);
+    }, panel(emptyNote('Session unavailable.')));
+  };
+
+  /* ============================== QUEST ============================== */
+  SM.screens.cquest = function(p){
+    return T(function(){
+      p = p || {}; var cid = p.camp||p.campId, qid = p.id||p.qid;
+      if (!cid || !qid) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Quest'}]) + emptyNote('Open a quest from a campaign workspace.'));
+      var q = T(function(){ return W.getQuest(cid, qid); }, null);
+      var camp = T(function(){ return SM.campaign.get(cid); }, null);
+      if (!q) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Quest'}]) + emptyNote('Quest not found.'));
+      var completed = (q.status==='completed'||q.completed);
+      var head = crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:(camp&&camp.name)||'Campaign',onclick:"SM.ui.go('workspace',{opened:'"+jarg(cid)+"'})"},{label:q.title||'Quest'}]);
+      var refB = function(label, arr, type){ arr=AR(arr); if(!arr.length) return ''; return '<div class="small muted" style="margin-top:6px">'+esc(label)+'</div>'+arr.map(function(r){ var id=(r&&r.id!=null)?r.id:r; var nm=(r&&r.name)?r.name:id; return row(iconFor(type), nm, type, "SM.ui7.open('"+jarg(type)+"','"+jarg(id)+"')"); }).join(''); };
+      var body = eyebrow(q.title||'Quest') +
+        '<div class="small muted" style="margin-top:4px">'+pill(q.type||'main')+' '+pill(q.priority||'normal')+' '+pill(q.status||'active')+(q.custom?' '+suggestedBadge():'')+'</div>' +
+        (q.description?'<p class="small" style="margin-top:6px">'+esc(q.description)+'</p>':'') +
+        (AR(q.objectives).length?'<div class="small muted" style="margin-top:6px">Objectives</div><ul class="small">'+list(q.objectives,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'') +
+        (AR(q.optionalObjectives).length?'<div class="small muted">Optional</div><ul class="small">'+list(q.optionalObjectives,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'') +
+        refB('Encounters', q.encounters, 'encounter') + refB('Loot', q.loot, 'loot') +
+        (AR(q.notes).length?'<div class="small muted" style="margin-top:6px">Notes</div><ul class="small">'+list(q.notes,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'') +
+        '<div style="margin-top:10px">'+(completed
+          ? '<span class="tag">Completed</span> <button class="btn sm" onclick="SM.ui7d.reopenQuest(\''+jarg(cid)+'\',\''+jarg(qid)+'\')">Reopen</button>'
+          : '<button class="btn sm primary" onclick="SM.ui7d.completeQuest(\''+jarg(cid)+'\',\''+jarg(qid)+'\')">Complete Quest</button>')+
+        ' <button class="btn sm" onclick="SM.ui7d.archiveQuest(\''+jarg(cid)+'\',\''+jarg(qid)+'\')">Archive</button></div>' +
+        '<p class="small muted" style="margin-top:8px">Rewards are granted through the game\u2019s reward system only once, when the quest is completed.</p>';
+      return head + panel(body);
+    }, panel(emptyNote('Quest unavailable.')));
+  };
+
+  /* ============================= LOCATION ============================= */
+  SM.screens.cloc = function(p){
+    return T(function(){
+      p = p || {}; var cid = p.camp||p.campId, lid = p.id||p.lid;
+      if (!cid || !lid) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Location'}]) + emptyNote('Open a location from a campaign workspace.'));
+      var l = T(function(){ return W.getLocation(cid, lid); }, null);
+      var camp = T(function(){ return SM.campaign.get(cid); }, null);
+      if (!l) return panel(crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Location'}]) + emptyNote('Location not found.'));
+      var head = crumbs([{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:(camp&&camp.name)||'Campaign',onclick:"SM.ui.go('workspace',{opened:'"+jarg(cid)+"'})"},{label:l.name||'Location'}]);
+      var body = eyebrow(l.name||'Location') +
+        '<div class="small muted" style="margin-top:4px">'+(l.region?pill(l.region)+' ':'')+(l.environment?pill(l.environment)+' ':'')+(l.threat?pill('threat: '+l.threat):'')+(l.custom?' '+suggestedBadge():'')+'</div>' +
+        (l.description?'<p class="small" style="margin-top:6px">'+esc(l.description)+'</p>':'') +
+        (AR(l.poi).length?'<div class="small muted" style="margin-top:6px">Points of Interest</div><ul class="small">'+list(l.poi,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'') +
+        (AR(l.notes).length?'<div class="small muted">Notes</div><ul class="small">'+list(l.notes,function(o){ return '<li>'+esc(o)+'</li>'; })+'</ul>':'');
+      return head + panel(body);
+    }, panel(emptyNote('Location unavailable.')));
+  };
+
+  /* ============================== AI GM ============================== */
+  var GM_TOOLS = [
+    ['quest','📜','Quest Generator'],['encounter','⚔️','Encounter Generator'],['session','📓','Session Planner'],
+    ['npc','🧑','NPC Generator'],['location','🏰','Location Generator'],['rewards','💰','Reward/Loot Assistant'],
+    ['boss','🐉','Boss & Creatures'],['recap','📝','Session Recap']
+  ];
+  SM.screens.gmai = function(p){
+    return T(function(){
+      p = p || {}; var camp = p.camp||p.campId||null;
+      var head = crumbs(camp?[{label:'Workspace',onclick:"SM.ui.go('workspace')"},{label:'Campaign',onclick:"SM.ui.go('workspace',{opened:'"+jarg(camp)+"'})"},{label:'AI GM Tools'}]:[{label:'AI GM Tools'}]);
+      var avail = T(function(){ return SM.ai && SM.ai.isAvailable ? SM.ai.isAvailable() : false; }, false);
+      var intro = panel(eyebrow('AI GM Tools') +
+        '<div class="small muted" style="margin-top:6px">'+suggestedBadge()+' All output is assembled offline by a deterministic helper (not an AI model), grounded in existing StormMythic records. Nothing is applied to your game until you save or complete it. Provider status: '+(avail?'connected':'offline (provider-neutral)')+'.</div>' +
+        '<div class="grid cols" style="margin-top:10px">'+GM_TOOLS.map(function(a){ return '<div class="card" style="text-align:center" onclick="SM.ui.go(\'gmai\',{'+(camp?"camp:'"+jarg(camp)+"',":'')+'tool:\''+a[0]+'\'})"><div style="font-size:1.5rem">'+a[1]+'</div><div class="small" style="margin-top:6px">'+a[2]+'</div></div>'; }).join('')+'</div>');
+      var result = '';
+      if (p.tool && G){
+        var obj = T(function(){
+          switch(p.tool){
+            case 'quest':     return G.generateQuest(p.prompt||'a new adventure hook', { camp:camp, tier:p.tier, environment:p.environment });
+            case 'encounter': return G.generateEncounter({ camp:camp, environment:p.environment, partySize:p.partySize, difficulty:p.difficulty, boss:p.boss, tier:p.tier });
+            case 'session':   return G.planSession({ campId:camp, theme:p.theme, n:p.n });
+            case 'npc':       return G.generateNpc({ name:p.name, role:p.role, faction:p.faction, location:p.location });
+            case 'location':  return G.generateLocation({ name:p.name, environment:p.environment });
+            case 'rewards':   return G.suggestRewards({ tier:p.tier, level:p.level });
+            case 'boss':      return G.suggestCreatures({ environment:p.environment, tier:p.tier });
+            case 'recap':     return G.recap({ title:p.title, objectives:p.objectives, completedObjectives:p.completedObjectives, encounters:p.encounters });
+            default: return null;
+          }
+        }, null);
+        result = '<div class="panel" style="margin-top:10px">'+eyebrow('Generated Suggestion')+renderSuggestion(obj)+'</div>';
+      }
+      return head + intro + result;
+    }, panel(emptyNote('AI GM Tools unavailable.')));
+  };
+
+  /* -------------------------------------------------- action helpers --- */
+  var X = SM.ui7d = SM.ui7d || {};
+  function reload(screen, params){ T(function(){ U.go(screen, params||{}); }); }
+  X.openWorkspace = function(id){ reload('workspace',{opened:id}); };
+  X.openSession   = function(c,s){ reload('csession',{camp:c,id:s}); };
+  X.openQuest     = function(c,q){ reload('cquest',{camp:c,id:q}); };
+  X.openLoc       = function(c,l){ reload('cloc',{camp:c,id:l}); };
+  X.addSession = function(c){ T(function(){ var t=(typeof prompt==='function'?prompt('Session title:'):null); W.addSession(c,{ title:t||undefined }); reload('workspace',{opened:c}); }); };
+  X.addQuest   = function(c){ T(function(){ var t=(typeof prompt==='function'?prompt('Quest title:'):null); W.addQuest(c,{ title:t||undefined }); reload('workspace',{opened:c}); }); };
+  X.completeQuest = function(c,q){ T(function(){ W.completeQuest(c,q,{ character:activeChar() }); if(U.toast) U.toast('Quest completed.','ok'); reload('cquest',{camp:c,id:q}); }); };
+  X.reopenQuest   = function(c,q){ T(function(){ W.reopenQuest(c,q); reload('cquest',{camp:c,id:q}); }); };
+  X.archiveQuest  = function(c,q){ T(function(){ W.archiveQuest(c,q); reload('workspace',{opened:c}); }); };
+  X.completeSession = function(c,s){ T(function(){ W.completeSession(c,s); if(U.toast) U.toast('Session completed.','ok'); reload('csession',{camp:c,id:s}); }); };
+  X.duplicateSession = function(c,s){ T(function(){ var d=W.duplicateSession(c,s); reload('csession',{camp:c,id:(d&&d.id)||s}); }); };
+  X.launchEncounter = function(c,e){ T(function(){ var spec=W.launchSpec(c,e); if(!spec||!spec.ok){ if(U.toast) U.toast('Could not launch encounter.','warn'); return; } var ids=(spec.creatureIds||[]); if(SM.cbt){ T(function(){ if(SM.cbt.reset) SM.cbt.reset(); }); ids.forEach(function(id){ T(function(){ if(SM.cbt.addEnemyFromLib) SM.cbt.addEnemyFromLib(id); }); }); } U.go('combat',{}); }); };
+  X.planSession = function(c){ reload('gmai',{camp:c,tool:'session'}); };
+  X.recapSession = function(c,s){ T(function(){ var ses=W.getSession(c,s)||{}; reload('gmai',{camp:c,tool:'recap',title:ses.title,objectives:ses.objectives,completedObjectives:ses.completedObjectives,encounters:ses.encounters}); }); };
+  X.gm = function(tool, camp){ reload('gmai',{ tool:tool, camp:camp||null }); };
+
+  /* ============================= NAV DECORATION ========================= */
+  if (typeof U.buildNav==='function' && !U._mc7dNav){
+    var _bn = U.buildNav; U._mc7dNav = true;
+    U.buildNav = function(){
+      _bn.apply(this, arguments);
+      try {
+        var el = hasDoc ? document.getElementById('sidenav') : null;
+        if (el && String(el.innerHTML).indexOf('data-nav="workspace"') < 0){
+          var links = [['workspace','🗺️','Campaign Workspace'],['gmai','🎲','AI GM Tools']].map(function(a){
+            return '<div class="navlink" data-nav="'+a[0]+'" onclick="SM.ui.go(\''+a[0]+'\')"><span class="ic">'+a[1]+'</span> '+a[2]+'</div>';
+          }).join('');
+          el.innerHTML += '<div class="navgroup">Campaign Workspace</div>'+links;
+        }
+      } catch(e){}
+      try { if (U.syncNav) U.syncNav(); } catch(e){}
+    };
+  }
+  if (typeof U.openMore==='function' && !U._mc7dMore){
+    var _more = U.openMore; U._mc7dMore = true;
+    U.openMore = function(){
+      _more.apply(this, arguments);
+      try {
+        var b = hasDoc ? document.getElementById('modalBody') : null;
+        if (b && String(b.innerHTML).indexOf("go('workspace')") < 0){
+          var extra = [['workspace','🗺️','Workspace'],['gmai','🎲','AI GM']].map(function(a){
+            return '<div class="card" style="text-align:center" onclick="SM.ui.closeModal();SM.ui.go(\''+a[0]+'\')"><div style="font-size:1.6rem">'+a[1]+'</div><div class="small" style="margin-top:6px">'+a[2]+'</div></div>';
+          }).join('');
+          b.innerHTML += '<div class="grid cols" style="margin-top:10px">'+extra+'</div>';
+        }
+      } catch(e){}
+    };
+  }
+
+})();
+
 </script>
 </body>
 </html>
